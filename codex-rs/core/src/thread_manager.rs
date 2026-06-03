@@ -1446,16 +1446,35 @@ fn stored_thread_to_initial_history(
     rollout_path: Option<PathBuf>,
 ) -> CodexResult<InitialHistory> {
     let thread_id = stored_thread.thread_id;
+    let protected_data_mode = stored_thread.protected_data_mode.clone();
     let history = stored_thread.history.ok_or_else(|| {
         CodexErr::Fatal(format!(
             "thread {thread_id} did not include persisted history"
         ))
     })?;
-    Ok(InitialHistory::Resumed(ResumedHistory {
+    let mut initial_history = InitialHistory::Resumed(ResumedHistory {
         conversation_id: thread_id,
         history: history.items,
         rollout_path: rollout_path.or(stored_thread.rollout_path),
-    }))
+    });
+    let history_state = initial_history
+        .get_protected_data_mode_state()
+        .unwrap_or_default();
+    let mut resolved_state = history_state.clone();
+    resolved_state.merge(protected_data_mode);
+    if resolved_state != history_state
+        && let InitialHistory::Resumed(resumed) = &mut initial_history
+    {
+        resumed.history.push(RolloutItem::EventMsg(
+            EventMsg::ThreadProtectedDataModeUpdated(
+                codex_protocol::protocol::ThreadProtectedDataModeUpdatedEvent {
+                    thread_id,
+                    state: resolved_state,
+                },
+            ),
+        ));
+    }
+    Ok(initial_history)
 }
 
 fn thread_store_rollout_read_error(err: ThreadStoreError) -> CodexErr {

@@ -469,6 +469,14 @@ impl Session {
         self.thread_id
     }
 
+    pub(crate) async fn protected_data_mode_active(&self) -> bool {
+        self.protected_data_mode.lock().await.active
+    }
+
+    pub(crate) async fn protected_data_mode_state(&self) -> ProtectedDataModeState {
+        self.protected_data_mode.lock().await.clone()
+    }
+
     /// Returns the identity shared by the root thread and all descendant threads.
     pub(crate) fn session_id(&self) -> SessionId {
         self.services.agent_control.session_id()
@@ -572,7 +580,7 @@ impl Session {
                                     } else {
                                         ThreadMemoryMode::Disabled
                                     },
-                                    protected_data_mode: Default::default(),
+                                    protected_data_mode: protected_data_mode.clone(),
                                 },
                             },
                         )

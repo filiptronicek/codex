@@ -190,17 +190,6 @@ impl App {
 
                 tui.frame_requester().schedule_frame();
             }
-            AppEvent::ExitProtectedDataMode => {
-                let Some(thread_id) = self.active_thread_id.or(self.chat_widget.thread_id()) else {
-                    self.chat_widget
-                        .add_error_message("No active thread to update.".to_string());
-                    return Ok(AppRunControl::Continue);
-                };
-                if let Err(err) = app_server.thread_protected_data_mode_exit(thread_id).await {
-                    self.chat_widget
-                        .add_error_message(format!("Failed to exit protected data mode: {err}"));
-                }
-            }
             AppEvent::BeginInitialHistoryReplayBuffer => {
                 self.begin_initial_history_replay_buffer();
             }

@@ -2508,6 +2508,9 @@ impl InitialHistory {
         };
         items.iter().rev().find_map(|item| match item {
             RolloutItem::SessionMeta(meta_line) => meta_line.meta.protected_data_mode.clone(),
+            RolloutItem::EventMsg(EventMsg::ThreadProtectedDataModeUpdated(event)) => {
+                Some(event.state.clone())
+            }
             _ => None,
         })
     }
@@ -4124,6 +4127,35 @@ mod tests {
                 categories: vec!["identity".to_string(), "financial".to_string()],
                 reason: Some("ledger result".to_string()),
             }
+        );
+    }
+
+    #[test]
+    fn initial_history_uses_latest_protected_data_mode_update_event() {
+        let thread_id = ThreadId::new();
+        let active = ProtectedDataModeState {
+            active: true,
+            categories: vec!["financial".to_string()],
+            reason: Some("ledger result".to_string()),
+        };
+        let history = InitialHistory::Forked(vec![
+            RolloutItem::EventMsg(EventMsg::ThreadProtectedDataModeUpdated(
+                ThreadProtectedDataModeUpdatedEvent {
+                    thread_id,
+                    state: active,
+                },
+            )),
+            RolloutItem::EventMsg(EventMsg::ThreadProtectedDataModeUpdated(
+                ThreadProtectedDataModeUpdatedEvent {
+                    thread_id,
+                    state: ProtectedDataModeState::default(),
+                },
+            )),
+        ]);
+
+        assert_eq!(
+            history.get_protected_data_mode_state(),
+            Some(ProtectedDataModeState::default())
         );
     }
 

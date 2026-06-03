@@ -67,6 +67,12 @@ pub(super) async fn read_thread(
             );
             thread = rollout_thread;
         }
+        if params.include_history
+            && let Some(rollout_path) = thread.rollout_path.as_deref()
+            && let Some(state) = latest_protected_data_mode_state(rollout_path).await
+        {
+            thread.protected_data_mode = state;
+        }
         attach_history_if_requested(&mut thread, params.include_history).await?;
         return Ok(thread);
     }
@@ -304,6 +310,9 @@ async fn latest_protected_data_mode_state(
         .rev()
         .find_map(|item| match item {
             RolloutItem::SessionMeta(meta_line) => meta_line.meta.protected_data_mode,
+            RolloutItem::EventMsg(
+                codex_protocol::protocol::EventMsg::ThreadProtectedDataModeUpdated(event),
+            ) => Some(event.state),
             _ => None,
         })
 }

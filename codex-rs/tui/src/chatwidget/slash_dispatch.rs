@@ -351,9 +351,6 @@ impl ChatWidget {
             SlashCommand::Memories => {
                 self.open_memories_popup();
             }
-            SlashCommand::ExitProtectedDataMode => {
-                self.app_event_tx.send(AppEvent::ExitProtectedDataMode);
-            }
             SlashCommand::Quit | SlashCommand::Exit => {
                 self.request_quit_without_confirmation();
             }
@@ -1005,7 +1002,6 @@ impl ChatWidget {
             | SlashCommand::Experimental
             | SlashCommand::AutoReview
             | SlashCommand::Memories
-            | SlashCommand::ExitProtectedDataMode
             | SlashCommand::Quit
             | SlashCommand::Exit
             | SlashCommand::Logout

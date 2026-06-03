@@ -7012,6 +7012,68 @@ pub(crate) async fn make_session_and_context_with_rx() -> (
     make_session_and_context_with_dynamic_tools_and_rx(Vec::new()).await
 }
 
+struct AllowProtectedDataModeExitPolicy;
+
+impl crate::ProtectedDataModeExitPolicy for AllowProtectedDataModeExitPolicy {
+    fn can_exit(
+        &self,
+        _thread_id: ThreadId,
+    ) -> crate::protected_data_mode::ProtectedDataModeExitFuture<'_> {
+        Box::pin(async { Ok(true) })
+    }
+}
+
+#[tokio::test]
+async fn protected_data_mode_exit_is_denied_by_default() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    merge_protected_data_mode(
+        session.as_ref(),
+        ProtectedDataModeState {
+            active: true,
+            categories: vec!["financial".to_string()],
+            reason: Some("sensitive connector result".to_string()),
+        },
+    )
+    .await
+    .expect("activate protected data mode");
+
+    let err = try_exit_protected_data_mode(session.as_ref())
+        .await
+        .expect_err("default policy should deny exit");
+
+    assert_eq!(err.to_string(), "protected data mode exit is not allowed");
+    assert!(session.protected_data_mode.lock().await.active);
+}
+
+#[tokio::test]
+async fn protected_data_mode_exit_clears_state_when_policy_allows() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    merge_protected_data_mode(
+        session.as_ref(),
+        ProtectedDataModeState {
+            active: true,
+            categories: vec!["financial".to_string()],
+            reason: Some("sensitive connector result".to_string()),
+        },
+    )
+    .await
+    .expect("activate protected data mode");
+    *session
+        .services
+        .protected_data_mode_exit_policy
+        .write()
+        .await = Arc::new(AllowProtectedDataModeExitPolicy);
+
+    try_exit_protected_data_mode(session.as_ref())
+        .await
+        .expect("allowed policy should exit protected data mode");
+
+    assert_eq!(
+        *session.protected_data_mode.lock().await,
+        ProtectedDataModeState::default()
+    );
+}
+
 #[tokio::test]
 async fn refresh_mcp_servers_is_deferred_until_next_turn() {
     let (session, turn_context) = make_session_and_context().await;

@@ -73,8 +73,6 @@ use codex_app_server_protocol::ThreadMemoryModeSetResponse;
 use codex_app_server_protocol::ThreadMetadataGitInfoUpdateParams;
 use codex_app_server_protocol::ThreadMetadataUpdateParams;
 use codex_app_server_protocol::ThreadMetadataUpdateResponse;
-use codex_app_server_protocol::ThreadProtectedDataModeExitParams;
-use codex_app_server_protocol::ThreadProtectedDataModeExitResponse;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadRealtimeAppendAudioParams;
@@ -829,24 +827,6 @@ impl AppServerSession {
             })
             .await
             .wrap_err("memory/reset failed in TUI")?;
-        Ok(())
-    }
-
-    pub(crate) async fn thread_protected_data_mode_exit(
-        &mut self,
-        thread_id: ThreadId,
-    ) -> Result<()> {
-        let request_id = self.next_request_id();
-        let _: ThreadProtectedDataModeExitResponse = self
-            .client
-            .request_typed(ClientRequest::ThreadProtectedDataModeExit {
-                request_id,
-                params: ThreadProtectedDataModeExitParams {
-                    thread_id: thread_id.to_string(),
-                },
-            })
-            .await
-            .wrap_err("thread/protected-data-mode/exit failed in TUI")?;
         Ok(())
     }
 

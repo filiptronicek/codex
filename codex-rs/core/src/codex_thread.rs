@@ -26,6 +26,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::ProtectedDataModeState;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
@@ -243,6 +244,14 @@ impl CodexThread {
     /// Persist whether this thread is eligible for future memory generation.
     pub async fn set_thread_memory_mode(&self, mode: ThreadMemoryMode) -> anyhow::Result<()> {
         self.codex.set_thread_memory_mode(mode).await
+    }
+
+    pub async fn exit_protected_data_mode(&self) -> anyhow::Result<()> {
+        crate::session::try_exit_protected_data_mode(self.codex.session.as_ref()).await
+    }
+
+    pub async fn protected_data_mode(&self) -> ProtectedDataModeState {
+        self.codex.session.protected_data_mode_state().await
     }
 
     pub async fn steer_input(

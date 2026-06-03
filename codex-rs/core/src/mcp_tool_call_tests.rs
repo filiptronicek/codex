@@ -2775,6 +2775,78 @@ async fn full_access_mode_skips_mcp_tool_approval_for_all_approval_modes() {
 }
 
 #[tokio::test]
+async fn protected_data_mode_forces_one_time_user_approval_in_full_access_mode() {
+    let (session, mut turn_context, _rx_event) = make_session_and_context_with_rx().await;
+    let turn_context_mut = Arc::get_mut(&mut turn_context).expect("single turn context ref");
+    turn_context_mut
+        .approval_policy
+        .set(AskForApproval::Never)
+        .expect("test setup should allow updating approval policy");
+    turn_context_mut.permission_profile = PermissionProfile::Disabled;
+    crate::session::merge_protected_data_mode(
+        session.as_ref(),
+        codex_protocol::protocol::ProtectedDataModeState {
+            active: true,
+            categories: vec!["financial".to_string()],
+            reason: Some("sensitive connector result".to_string()),
+        },
+    )
+    .await
+    .expect("activate protected data mode");
+    {
+        let mut active_turn = session.active_turn.lock().await;
+        *active_turn = Some(ActiveTurn::default());
+    }
+
+    let invocation = McpInvocation {
+        server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+        tool: "read_only_tool".to_string(),
+        arguments: None,
+    };
+    let metadata = McpToolApprovalMetadata {
+        annotations: Some(annotations(
+            Some(true),
+            /*destructive*/ None,
+            /*open_world*/ None,
+        )),
+        connector_id: Some("ledger".to_string()),
+        connector_name: Some("Ledger".to_string()),
+        connector_description: Some("Read financial data".to_string()),
+        plugin_id: None,
+        tool_title: Some("Read Only Tool".to_string()),
+        tool_description: None,
+        mcp_app_resource_uri: None,
+        codex_apps_meta: None,
+        openai_file_input_params: None,
+    };
+
+    let mut approval_task = {
+        let session = Arc::clone(&session);
+        let turn_context = Arc::clone(&turn_context);
+        tokio::spawn(async move {
+            maybe_request_mcp_tool_approval(
+                &session,
+                &turn_context,
+                "call-protected",
+                &invocation,
+                &HookToolName::new("mcp__codex_apps__read_only_tool"),
+                Some(&metadata),
+                AppToolApproval::Approve,
+            )
+            .await
+        })
+    };
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut approval_task)
+            .await
+            .is_err(),
+        "protected data mode should wait for explicit user approval"
+    );
+    approval_task.abort();
+}
+
+#[tokio::test]
 async fn approve_mode_skips_guardian_in_every_permission_mode() {
     use wiremock::Mock;
     use wiremock::ResponseTemplate;

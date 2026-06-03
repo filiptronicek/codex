@@ -653,6 +653,8 @@ fn rollout_path_is_archived(store: &LocalThreadStore, path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use codex_protocol::models::PermissionProfile;
+    use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::ThreadProtectedDataModeUpdatedEvent;
     use pretty_assertions::assert_eq;
     use serde_json::Value;
     use serde_json::json;
@@ -794,7 +796,8 @@ mod tests {
         let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
         let uuid = Uuid::from_u128(304);
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
-        write_session_file(home.path(), "2025-01-03T15-30-00", uuid).expect("session file");
+        let path =
+            write_session_file(home.path(), "2025-01-03T15-30-00", uuid).expect("session file");
         let state = ProtectedDataModeState {
             active: true,
             categories: vec!["identity".to_string()],
@@ -824,6 +827,31 @@ mod tests {
                 .expect("read rollout-only thread")
                 .protected_data_mode,
             state
+        );
+
+        append_rollout_item_to_path(
+            path.as_path(),
+            &RolloutItem::EventMsg(EventMsg::ThreadProtectedDataModeUpdated(
+                ThreadProtectedDataModeUpdatedEvent {
+                    thread_id,
+                    state: ProtectedDataModeState::default(),
+                },
+            )),
+        )
+        .await
+        .expect("append protected data mode exit event");
+
+        assert_eq!(
+            store
+                .read_thread(ReadThreadParams {
+                    thread_id,
+                    include_archived: false,
+                    include_history: false,
+                })
+                .await
+                .expect("read rollout-only thread after exit")
+                .protected_data_mode,
+            ProtectedDataModeState::default()
         );
     }
 

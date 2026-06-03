@@ -198,6 +198,7 @@ use codex_protocol::exec_output::StreamOutput;
 mod config_lock;
 mod handlers;
 pub(crate) use handlers::merge_protected_data_mode;
+pub(crate) use handlers::try_exit_protected_data_mode;
 mod inject;
 mod input_queue;
 mod mcp;

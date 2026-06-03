@@ -23,6 +23,7 @@ use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::user_input::UserInput;
+use codex_thread_store::ThreadStore;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
 use core_test_support::responses::mount_models_once;
@@ -62,6 +63,117 @@ fn contextual_user_interrupted_marker() -> ResponseItem {
 fn developer_interrupted_marker() -> ResponseItem {
     interrupted_turn_history_marker(InterruptedTurnHistoryMarker::Developer)
         .expect("developer interrupted marker should be enabled")
+}
+
+#[tokio::test]
+async fn stored_thread_metadata_repairs_missing_protected_data_mode_history_event() {
+    let thread_id = ThreadId::new();
+    let store = codex_thread_store::InMemoryThreadStore::default();
+    store
+        .create_thread(codex_thread_store::CreateThreadParams {
+            thread_id,
+            forked_from_id: None,
+            parent_thread_id: None,
+            source: SessionSource::Exec,
+            thread_source: None,
+            base_instructions: Default::default(),
+            dynamic_tools: Vec::new(),
+            multi_agent_version: None,
+            metadata: codex_thread_store::ThreadPersistenceMetadata {
+                cwd: None,
+                model_provider: "test".to_string(),
+                memory_mode: codex_protocol::protocol::ThreadMemoryMode::Enabled,
+                protected_data_mode: Default::default(),
+            },
+        })
+        .await
+        .expect("create thread");
+    let state = codex_protocol::protocol::ProtectedDataModeState {
+        active: true,
+        categories: vec!["financial".to_string()],
+        reason: Some("ledger result".to_string()),
+    };
+    store
+        .update_thread_metadata(codex_thread_store::UpdateThreadMetadataParams {
+            thread_id,
+            patch: codex_thread_store::ThreadMetadataPatch {
+                protected_data_mode: Some(state.clone()),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await
+        .expect("update protected data mode");
+    let stored = store
+        .read_thread(codex_thread_store::ReadThreadParams {
+            thread_id,
+            include_archived: false,
+            include_history: true,
+        })
+        .await
+        .expect("read stored thread");
+
+    let history = stored_thread_to_initial_history(stored, /*rollout_path*/ None)
+        .expect("build initial history");
+
+    assert_eq!(history.get_protected_data_mode_state(), Some(state));
+}
+
+#[tokio::test]
+async fn stored_thread_history_keeps_protected_data_mode_when_metadata_is_stale() {
+    let thread_id = ThreadId::new();
+    let store = codex_thread_store::InMemoryThreadStore::default();
+    store
+        .create_thread(codex_thread_store::CreateThreadParams {
+            thread_id,
+            forked_from_id: None,
+            parent_thread_id: None,
+            source: SessionSource::Exec,
+            thread_source: None,
+            base_instructions: Default::default(),
+            dynamic_tools: Vec::new(),
+            multi_agent_version: None,
+            metadata: codex_thread_store::ThreadPersistenceMetadata {
+                cwd: None,
+                model_provider: "test".to_string(),
+                memory_mode: codex_protocol::protocol::ThreadMemoryMode::Enabled,
+                protected_data_mode: Default::default(),
+            },
+        })
+        .await
+        .expect("create thread");
+    let state = codex_protocol::protocol::ProtectedDataModeState {
+        active: true,
+        categories: vec!["financial".to_string()],
+        reason: Some("ledger result".to_string()),
+    };
+    store
+        .append_items(codex_thread_store::AppendThreadItemsParams {
+            thread_id,
+            items: vec![RolloutItem::EventMsg(
+                EventMsg::ThreadProtectedDataModeUpdated(
+                    codex_protocol::protocol::ThreadProtectedDataModeUpdatedEvent {
+                        thread_id,
+                        state: state.clone(),
+                    },
+                ),
+            )],
+        })
+        .await
+        .expect("append protected data mode event");
+    let stored = store
+        .read_thread(codex_thread_store::ReadThreadParams {
+            thread_id,
+            include_archived: false,
+            include_history: true,
+        })
+        .await
+        .expect("read stored thread");
+
+    let history = stored_thread_to_initial_history(stored, /*rollout_path*/ None)
+        .expect("build initial history");
+
+    assert_eq!(history.get_protected_data_mode_state(), Some(state));
 }
 
 #[test]

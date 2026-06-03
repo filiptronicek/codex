@@ -1170,14 +1170,22 @@ async fn maybe_request_mcp_tool_approval(
     metadata: Option<&McpToolApprovalMetadata>,
     approval_mode: AppToolApproval,
 ) -> Option<McpToolApprovalDecision> {
+    let protected_data_mode_active = sess.protected_data_mode_active().await;
+    let approval_mode = if protected_data_mode_active {
+        AppToolApproval::Prompt
+    } else {
+        approval_mode
+    };
     let approvals_reviewer = mcp_approvals_reviewer(turn_context, &invocation.server, metadata);
-    if mcp_permission_prompt_is_auto_approved(
-        turn_context.approval_policy.value(),
-        &turn_context.permission_profile(),
-        McpPermissionPromptAutoApproveContext {
-            tool_approval_mode: Some(approval_mode),
-        },
-    ) {
+    if !protected_data_mode_active
+        && mcp_permission_prompt_is_auto_approved(
+            turn_context.approval_policy.value(),
+            &turn_context.permission_profile(),
+            McpPermissionPromptAutoApproveContext {
+                tool_approval_mode: Some(approval_mode),
+            },
+        )
+    {
         return None;
     }
 
@@ -1211,7 +1219,9 @@ async fn maybe_request_mcp_tool_approval(
     .await
     {
         Some(PermissionRequestDecision::Allow) => {
-            return Some(McpToolApprovalDecision::Accept);
+            if !protected_data_mode_active {
+                return Some(McpToolApprovalDecision::Accept);
+            }
         }
         Some(PermissionRequestDecision::Deny { message }) => {
             return Some(McpToolApprovalDecision::Decline {
@@ -1237,15 +1247,24 @@ async fn maybe_request_mcp_tool_approval(
         )
         .await;
         let decision = mcp_tool_approval_decision_from_guardian(sess, &review_id, decision).await;
-        apply_mcp_tool_approval_decision(
-            sess,
-            turn_context,
-            &decision,
-            session_approval_key,
-            persistent_approval_key,
-        )
-        .await;
-        return Some(decision);
+        let continue_to_user_prompt = protected_data_mode_active
+            && matches!(
+                decision,
+                McpToolApprovalDecision::Accept
+                    | McpToolApprovalDecision::AcceptForSession
+                    | McpToolApprovalDecision::AcceptAndRemember
+            );
+        if !continue_to_user_prompt {
+            apply_mcp_tool_approval_decision(
+                sess,
+                turn_context,
+                &decision,
+                session_approval_key,
+                persistent_approval_key,
+            )
+            .await;
+            return Some(decision);
+        }
     }
 
     let prompt_options = mcp_tool_approval_prompt_options(

@@ -654,7 +654,7 @@ pub(crate) async fn merge_protected_data_mode(
     if updated == previous {
         return Ok(());
     }
-    persist_protected_data_mode_update(sess, updated.clone()).await?;
+    let persist_result = persist_protected_data_mode_update(sess, updated.clone()).await;
     *sess.protected_data_mode.lock().await = updated.clone();
     sess.send_event_raw(Event {
         id: sess.next_internal_sub_id(),
@@ -664,51 +664,44 @@ pub(crate) async fn merge_protected_data_mode(
         }),
     })
     .await;
-    Ok(())
+    persist_result
 }
 
-pub async fn exit_protected_data_mode(sess: &Arc<Session>, sub_id: String) {
+pub(crate) async fn try_exit_protected_data_mode(sess: &Session) -> anyhow::Result<()> {
     let exit_policy = sess
         .services
         .protected_data_mode_exit_policy
         .read()
         .await
         .clone();
-    let allowed = exit_policy.can_exit(sess.thread_id).await;
-    let result = match allowed {
-        Ok(true) => {
-            let state = ProtectedDataModeState::default();
-            persist_protected_data_mode_update(sess, state.clone())
-                .await
-                .map(|()| state)
-        }
-        Ok(false) => Err(anyhow::anyhow!("protected data mode exit is not allowed")),
-        Err(err) => Err(err),
-    };
-    match result {
-        Ok(state) => {
-            *sess.protected_data_mode.lock().await = state.clone();
-            sess.send_event_raw(Event {
-                id: sub_id,
-                msg: EventMsg::ThreadProtectedDataModeUpdated(
-                    ThreadProtectedDataModeUpdatedEvent {
-                        thread_id: sess.thread_id,
-                        state,
-                    },
-                ),
-            })
-            .await;
-        }
-        Err(err) => {
-            sess.send_event_raw(Event {
-                id: sub_id,
-                msg: EventMsg::Error(ErrorEvent {
-                    message: err.to_string(),
-                    codex_error_info: Some(CodexErrorInfo::Other),
-                }),
-            })
-            .await;
-        }
+    if !exit_policy.can_exit(sess.thread_id).await? {
+        anyhow::bail!("protected data mode exit is not allowed");
+    }
+
+    let state = ProtectedDataModeState::default();
+    persist_protected_data_mode_update(sess, state.clone()).await?;
+    *sess.protected_data_mode.lock().await = state.clone();
+    sess.send_event_raw(Event {
+        id: sess.next_internal_sub_id(),
+        msg: EventMsg::ThreadProtectedDataModeUpdated(ThreadProtectedDataModeUpdatedEvent {
+            thread_id: sess.thread_id,
+            state,
+        }),
+    })
+    .await;
+    Ok(())
+}
+
+pub async fn exit_protected_data_mode(sess: &Arc<Session>, sub_id: String) {
+    if let Err(err) = try_exit_protected_data_mode(sess).await {
+        sess.send_event_raw(Event {
+            id: sub_id,
+            msg: EventMsg::Error(ErrorEvent {
+                message: err.to_string(),
+                codex_error_info: Some(CodexErrorInfo::Other),
+            }),
+        })
+        .await;
     }
 }
 

@@ -532,7 +532,7 @@ impl ThreadRequestProcessor {
             .await
             .map_err(|err| core_thread_write_error("exit protected data mode", err))?;
         thread
-            .submit(Op::ExitProtectedDataMode)
+            .exit_protected_data_mode()
             .await
             .map_err(|err| internal_error(format!("failed to exit protected data mode: {err}")))?;
         Ok(Some(ThreadProtectedDataModeExitResponse {}.into()))
