@@ -294,6 +294,7 @@ async fn blocking_terminate_unified_process(
                 }),
             },
             SandboxType::None,
+            /*sandbox_violation_context*/ None,
         )
         .await?,
     ))
