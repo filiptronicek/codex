@@ -2709,7 +2709,7 @@ async fn plugin_detail_not_installable_plugin_disables_install_action() {
 }
 
 #[tokio::test]
-async fn plugin_uninstall_success_returns_to_cached_plugin_list() {
+async fn plugin_uninstall_success_updates_cached_plugin_list() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_feature_enabled(Feature::Plugins, /*enabled*/ true);
 
@@ -2733,13 +2733,29 @@ async fn plugin_uninstall_success_returns_to_cached_plugin_list() {
     chat.open_plugin_uninstall_loading_popup("Docs");
     chat.on_plugin_uninstall_loaded(
         cwd.to_path_buf(),
+        "plugin-docs".to_string(),
         "Docs".to_string(),
         Ok(PluginUninstallResponse {}),
     );
     let popup = render_bottom_popup(&chat, /*width*/ 120);
+    let plugin_row = popup
+        .lines()
+        .find(|line| line.contains("Docs"))
+        .expect("expected Docs plugin row");
     assert!(
-        popup.contains("Browse plugins from available marketplaces.") && popup.contains("Docs"),
-        "expected uninstall success to return to cached plugin list, got:\n{popup}"
+        popup.contains("Installed 0 of 1 available plugins.")
+            && plugin_row.contains("Available")
+            && !plugin_row.contains("Installed"),
+        "expected uninstall success to update the cached plugin list, got:\n{popup}"
+    );
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Right));
+    let installed_popup = render_bottom_popup(&chat, /*width*/ 120);
+    assert!(
+        installed_popup.contains("Showing 0 installed plugins.")
+            && installed_popup.contains("No installed plugins")
+            && !installed_popup.contains("Docs"),
+        "expected uninstalled plugin to be absent from the Installed tab, got:\n{installed_popup}"
     );
 }
 
