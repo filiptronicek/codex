@@ -61,6 +61,7 @@ pub struct MitmState {
 
 pub(crate) struct MitmUpstreamConfig {
     pub(crate) allow_upstream_proxy: bool,
+    pub(crate) respect_system_proxy: bool,
     pub(crate) allow_local_binding: bool,
 }
 
@@ -108,10 +109,12 @@ impl MitmState {
         // apply policy.
         let ca = ManagedMitmCa::load_or_create()?;
 
-        let upstream = if config.allow_upstream_proxy {
-            UpstreamClient::from_env_proxy_with_allow_local_binding(config.allow_local_binding)
-        } else {
+        let upstream = if !config.allow_upstream_proxy {
             UpstreamClient::direct_with_allow_local_binding(config.allow_local_binding)
+        } else if config.respect_system_proxy {
+            UpstreamClient::from_system_proxy_with_allow_local_binding(config.allow_local_binding)
+        } else {
+            UpstreamClient::from_env_proxy_with_allow_local_binding(config.allow_local_binding)
         };
 
         Ok(Self {

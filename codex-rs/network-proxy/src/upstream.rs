@@ -1,5 +1,8 @@
 use crate::connect_policy::TargetCheckedTcpConnector;
 use crate::state::NetworkProxyState;
+use codex_client::RouteFailureClass;
+use codex_client::SystemProxyRouteDecision;
+use codex_client::resolve_system_proxy_for_url;
 use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
 use rama_core::Layer;
 use rama_core::Service;
@@ -23,20 +26,33 @@ use rama_tls_rustls::client::TlsConnectorDataBuilder;
 use rama_tls_rustls::client::TlsConnectorLayer;
 use std::sync::Arc;
 use std::time::Instant;
+use thiserror::Error;
 use tracing::info;
 use tracing::warn;
 
 #[cfg(target_os = "macos")]
 use rama_unix::client::UnixConnector;
 
+#[derive(Debug, Error)]
+pub(crate) enum UpstreamProxyError {
+    #[error("system proxy resolution failed: {0}")]
+    SystemProxyUnavailable(RouteFailureClass),
+
+    #[error("system proxy returned invalid proxy URL: {url}")]
+    InvalidSystemProxyUrl { url: String },
+
+    #[error("system proxy returned unsupported proxy protocol: {url}")]
+    UnsupportedSystemProxyProtocol { url: String },
+}
+
 #[derive(Clone, Default)]
-struct ProxyConfig {
+struct EnvProxyConfig {
     http: Option<ProxyAddress>,
     https: Option<ProxyAddress>,
     all: Option<ProxyAddress>,
 }
 
-impl ProxyConfig {
+impl EnvProxyConfig {
     fn from_env() -> Self {
         let http = read_proxy_env(&["HTTP_PROXY", "http_proxy"]);
         let https = read_proxy_env(&["HTTPS_PROXY", "https_proxy"]);
@@ -54,6 +70,76 @@ impl ProxyConfig {
             self.http.clone().or_else(|| self.all.clone())
         }
     }
+}
+
+#[derive(Clone)]
+struct ProxyConfig {
+    respect_system_proxy: bool,
+    env: EnvProxyConfig,
+}
+
+impl ProxyConfig {
+    fn direct() -> Self {
+        Self {
+            respect_system_proxy: false,
+            env: EnvProxyConfig::default(),
+        }
+    }
+
+    fn from_env() -> Self {
+        Self {
+            respect_system_proxy: false,
+            env: EnvProxyConfig::from_env(),
+        }
+    }
+
+    fn respect_system_proxy() -> Self {
+        Self {
+            respect_system_proxy: true,
+            env: EnvProxyConfig::from_env(),
+        }
+    }
+
+    fn proxy_for_url(&self, request_url: &str, is_secure: bool) -> Option<ProxyAddress> {
+        if self.respect_system_proxy {
+            match system_proxy_for_url(request_url) {
+                Ok(proxy) => return proxy,
+                Err(err) => {
+                    warn!("system proxy unavailable; falling back to env proxy ({err})");
+                }
+            }
+        }
+        self.env.proxy_for_protocol(is_secure)
+    }
+}
+
+fn system_proxy_for_url(request_url: &str) -> Result<Option<ProxyAddress>, UpstreamProxyError> {
+    match resolve_system_proxy_for_url(request_url) {
+        SystemProxyRouteDecision::Direct => Ok(None),
+        SystemProxyRouteDecision::Proxy { url } => proxy_address_from_system_url(&url).map(Some),
+        SystemProxyRouteDecision::Unavailable { failure } => {
+            Err(UpstreamProxyError::SystemProxyUnavailable(failure))
+        }
+    }
+}
+
+fn proxy_address_from_system_url(proxy_url: &str) -> Result<ProxyAddress, UpstreamProxyError> {
+    let proxy = ProxyAddress::try_from(proxy_url).map_err(|_| {
+        UpstreamProxyError::InvalidSystemProxyUrl {
+            url: proxy_url.to_string(),
+        }
+    })?;
+    if proxy
+        .protocol
+        .as_ref()
+        .map(rama_net::Protocol::is_http)
+        .unwrap_or(true)
+    {
+        return Ok(proxy);
+    }
+    Err(UpstreamProxyError::UnsupportedSystemProxyProtocol {
+        url: proxy_url.to_string(),
+    })
 }
 
 fn read_proxy_env(keys: &[&str]) -> Option<ProxyAddress> {
@@ -85,8 +171,16 @@ fn read_proxy_env(keys: &[&str]) -> Option<ProxyAddress> {
     None
 }
 
-pub(crate) fn proxy_for_connect() -> Option<ProxyAddress> {
-    ProxyConfig::from_env().proxy_for_protocol(/*is_secure*/ true)
+pub(crate) fn proxy_for_connect(
+    request_url: &str,
+    respect_system_proxy: bool,
+) -> Option<ProxyAddress> {
+    let config = if respect_system_proxy {
+        ProxyConfig::respect_system_proxy()
+    } else {
+        ProxyConfig::from_env()
+    };
+    config.proxy_for_url(request_url, /*is_secure*/ true)
 }
 
 #[derive(Clone)]
@@ -101,10 +195,7 @@ pub(crate) struct UpstreamClient {
 
 impl UpstreamClient {
     pub(crate) fn direct(state: Arc<NetworkProxyState>) -> Self {
-        Self::new(
-            ProxyConfig::default(),
-            TargetCheckedTcpConnector::new(state),
-        )
+        Self::new(ProxyConfig::direct(), TargetCheckedTcpConnector::new(state))
     }
 
     pub(crate) fn from_env_proxy(state: Arc<NetworkProxyState>) -> Self {
@@ -114,9 +205,16 @@ impl UpstreamClient {
         )
     }
 
+    pub(crate) fn from_system_proxy(state: Arc<NetworkProxyState>) -> Self {
+        Self::new(
+            ProxyConfig::respect_system_proxy(),
+            TargetCheckedTcpConnector::new(state),
+        )
+    }
+
     pub(crate) fn direct_with_allow_local_binding(allow_local_binding: bool) -> Self {
         Self::new(
-            ProxyConfig::default(),
+            ProxyConfig::direct(),
             TargetCheckedTcpConnector::from_allow_local_binding(allow_local_binding),
         )
     }
@@ -128,12 +226,19 @@ impl UpstreamClient {
         )
     }
 
+    pub(crate) fn from_system_proxy_with_allow_local_binding(allow_local_binding: bool) -> Self {
+        Self::new(
+            ProxyConfig::respect_system_proxy(),
+            TargetCheckedTcpConnector::from_allow_local_binding(allow_local_binding),
+        )
+    }
+
     #[cfg(target_os = "macos")]
     pub(crate) fn unix_socket(path: &str) -> Self {
         let connector = build_unix_connector(path);
         Self {
             connector,
-            proxy_config: ProxyConfig::default(),
+            proxy_config: ProxyConfig::direct(),
         }
     }
 
@@ -156,12 +261,11 @@ impl Service<Request<Body>> for UpstreamClient {
             .as_ref()
             .map(|ctx| ctx.host_with_port().to_string())
             .unwrap_or_else(|| "<unknown>".to_string());
-        let proxy = self.proxy_config.proxy_for_protocol(
-            request_context
-                .as_ref()
-                .map(|ctx| ctx.protocol.is_secure())
-                .unwrap_or(false),
-        );
+        let proxy = request_context.as_ref().and_then(|request_context| {
+            let request_url = request_target_url(&req, request_context);
+            self.proxy_config
+                .proxy_for_url(&request_url, request_context.protocol.is_secure())
+        });
         match proxy.as_ref() {
             Some(proxy) => info!(
                 "HTTP upstream route selected (target={authority}, route=upstream_proxy, proxy={})",
@@ -217,6 +321,25 @@ impl Service<Request<Body>> for UpstreamClient {
             }
         }
     }
+}
+
+fn request_target_url(req: &Request<Body>, request_context: &RequestContext) -> String {
+    if req.uri().scheme_str().is_some() && req.uri().authority().is_some() {
+        return req.uri().to_string();
+    }
+
+    let scheme = if request_context.protocol.is_secure() {
+        "https"
+    } else {
+        "http"
+    };
+    let authority = request_context.host_with_port();
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(rama_http::uri::PathAndQuery::as_str)
+        .unwrap_or("/");
+    format!("{scheme}://{authority}{path}")
 }
 
 fn build_http_connector(
