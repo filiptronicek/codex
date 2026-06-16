@@ -638,7 +638,7 @@ async fn selected_user_config_file_layers_over_base_user_config() {
         tmp.path().join(CONFIG_TOML_FILE),
         r#"
 model = "gpt-main"
-approval_policy = "on-failure"
+approval_policy = "on-request"
 "#,
     )
     .expect("write default user config");
@@ -695,7 +695,7 @@ approval_policy = "on-failure"
             .effective_config()
             .get("approval_policy")
             .and_then(TomlValue::as_str),
-        Some("on-failure")
+        Some("on-request")
     );
 }
 
@@ -1031,12 +1031,6 @@ personality = true
     config_requirements
         .approval_policy
         .can_set(&AskForApproval::Never)?;
-    assert!(
-        config_requirements
-            .approval_policy
-            .can_set(&AskForApproval::OnFailure)
-            .is_err()
-    );
     assert_eq!(
         config_requirements.web_search_mode.value(),
         WebSearchMode::Cached
