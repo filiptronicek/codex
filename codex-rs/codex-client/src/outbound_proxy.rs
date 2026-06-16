@@ -14,14 +14,16 @@ use std::time::Instant;
 
 use crate::custom_ca::BuildCustomCaTransportError;
 use crate::custom_ca::build_reqwest_client_with_custom_ca;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use sha2::Digest;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use sha2::Sha256;
 use thiserror::Error;
 
 const SYSTEM_PROXY_SUCCESS_CACHE_TTL: Duration = Duration::from_secs(60);
 
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -211,7 +213,7 @@ impl RequestOrigin {
     }
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SystemProxyDecision {
     Direct,
@@ -229,12 +231,17 @@ fn resolve_system_proxy(request_url: &str, origin: &RequestOrigin) -> SystemProx
     decision
 }
 
+#[cfg(target_os = "macos")]
+fn resolve_platform_system_proxy(request_url: &str, origin: &RequestOrigin) -> SystemProxyDecision {
+    macos::resolve(request_url, origin)
+}
+
 #[cfg(target_os = "windows")]
 fn resolve_platform_system_proxy(request_url: &str, origin: &RequestOrigin) -> SystemProxyDecision {
     windows::resolve(request_url, origin)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn resolve_platform_system_proxy(
     _request_url: &str,
     _origin: &RequestOrigin,
@@ -285,7 +292,7 @@ fn cache_system_proxy_decision(request_url: &str, decision: SystemProxyDecision)
 }
 
 fn system_proxy_cache_key(request_url: &str) -> String {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         // Keep URL-specific PAC decisions without retaining the raw routed URL.
         let mut hasher = Sha256::new();
@@ -294,7 +301,7 @@ fn system_proxy_cache_key(request_url: &str) -> String {
         format!("{:x}", hasher.finalize())
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     request_url.to_string()
 }
 

@@ -99,6 +99,6 @@ fn system_proxy_cache_key_preserves_url_specific_pac_decisions() {
         cache_key,
         system_proxy_cache_key("https://auth.openai.com/oauth/revoke")
     );
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     assert!(!cache_key.contains(request_url));
 }
