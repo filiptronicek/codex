@@ -65,6 +65,7 @@ use rmcp::model::InitializeRequestParams;
 use rmcp::model::ProtocolVersion;
 use rmcp::model::Tool as RmcpTool;
 use tokio_util::sync::CancellationToken;
+use tracing::instrument;
 use tracing::warn;
 
 /// MCP server capability indicating that Codex should include [`SandboxState`]
@@ -137,6 +138,7 @@ pub(crate) struct AsyncManagedClient {
 impl AsyncManagedClient {
     // Keep this constructor flat so the startup inputs remain readable at the
     // single call site instead of introducing a one-off params wrapper.
+    #[instrument(level = "trace", skip_all, fields(server_name = %server_name))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         server_name: String,
@@ -342,6 +344,7 @@ impl From<anyhow::Error> for StartupOutcomeError {
     }
 }
 
+#[instrument(level = "trace", skip_all, fields(server_name = %server_name))]
 pub(crate) async fn list_tools_for_client_uncached(
     server_name: &str,
     client: &Arc<RmcpClient>,
@@ -470,6 +473,7 @@ fn validate_mcp_server_name(server_name: &str) -> Result<()> {
     Ok(())
 }
 
+#[instrument(level = "trace", skip_all, fields(server_name = %server_name))]
 async fn start_server_task(
     server_name: String,
     client: Arc<RmcpClient>,
@@ -576,6 +580,7 @@ struct StartServerTaskParams {
     client_elicitation_capability: ElicitationCapability,
 }
 
+#[instrument(level = "trace", skip_all, fields(server_name = %server_name))]
 async fn make_rmcp_client(
     server_name: &str,
     server: EffectiveMcpServer,
