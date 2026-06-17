@@ -1896,7 +1896,7 @@ async fn plugins_popup_openai_curated_tab_omits_marketplace_in_rows() {
 }
 
 #[tokio::test]
-async fn plugins_popup_remote_row_opens_remote_detail() {
+async fn plugins_popup_workspace_remote_row_opens_remote_detail() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_feature_enabled(Feature::Plugins, /*enabled*/ true);
 
@@ -2365,7 +2365,7 @@ async fn plugins_popup_remote_local_dedupe_prefers_installed_remote_after_mapped
 }
 
 #[tokio::test]
-async fn plugin_detail_remote_install_uses_remote_location() {
+async fn plugin_detail_remote_install_renders_source_and_uses_remote_location() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_feature_enabled(Feature::Plugins, /*enabled*/ true);
 
@@ -2497,7 +2497,7 @@ async fn plugin_detail_remote_shared_plugin_does_not_offer_checkout() {
 }
 
 #[tokio::test]
-async fn plugin_detail_remote_uninstall_uses_remote_plugin_id() {
+async fn plugin_detail_shared_remote_uninstall_uses_remote_plugin_id() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_feature_enabled(Feature::Plugins, /*enabled*/ true);
 
@@ -2557,7 +2557,7 @@ async fn plugin_detail_remote_uninstall_uses_remote_plugin_id() {
 }
 
 #[tokio::test]
-async fn plugin_detail_remote_without_remote_id_disables_uninstall_action() {
+async fn plugin_detail_shared_remote_without_remote_id_disables_uninstall_action() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_feature_enabled(Feature::Plugins, /*enabled*/ true);
 

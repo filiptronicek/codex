@@ -1502,6 +1502,7 @@ pub(super) fn plugins_test_remote_detail(
         marketplace_name: marketplace_name.to_string(),
         marketplace_path: None,
         summary,
+        share_url: None,
         description: description.map(str::to_string),
         skills: Vec::new(),
         hooks: Vec::new(),
