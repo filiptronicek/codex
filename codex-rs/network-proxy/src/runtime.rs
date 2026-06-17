@@ -2,6 +2,7 @@ use crate::config::NetworkDomainPermission;
 use crate::config::NetworkMode;
 use crate::config::NetworkProxyConfig;
 use crate::config::ValidatedUnixSocketPath;
+use crate::credential_broker::CredentialBroker;
 use crate::mitm::MitmState;
 use crate::mitm_hook::HookEvaluation;
 use crate::mitm_hook::MitmHooksByHost;
@@ -23,6 +24,7 @@ use anyhow::Result;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use globset::GlobSet;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -207,6 +209,7 @@ pub struct NetworkProxyState {
     state: Arc<RwLock<ConfigState>>,
     reloader: Arc<dyn ConfigReloader>,
     blocked_request_observer: Arc<RwLock<Option<Arc<dyn BlockedRequestObserver>>>>,
+    credential_broker: CredentialBroker,
     audit_metadata: NetworkProxyAuditMetadata,
 }
 
@@ -224,6 +227,7 @@ impl Clone for NetworkProxyState {
             state: self.state.clone(),
             reloader: self.reloader.clone(),
             blocked_request_observer: self.blocked_request_observer.clone(),
+            credential_broker: self.credential_broker.clone(),
             audit_metadata: self.audit_metadata.clone(),
         }
     }
@@ -271,6 +275,7 @@ impl NetworkProxyState {
         blocked_request_observer: Option<Arc<dyn BlockedRequestObserver>>,
     ) -> Self {
         Self {
+            credential_broker: CredentialBroker::new(state.config.network.credential_broker),
             state: Arc::new(RwLock::new(state)),
             reloader,
             blocked_request_observer: Arc::new(RwLock::new(blocked_request_observer)),
@@ -288,6 +293,14 @@ impl NetworkProxyState {
 
     pub fn audit_metadata(&self) -> &NetworkProxyAuditMetadata {
         &self.audit_metadata
+    }
+
+    pub fn virtualize_child_credentials(&self, env: &mut HashMap<String, String>) {
+        self.credential_broker.virtualize_child_env(env);
+    }
+
+    pub fn inject_request_credentials(&self, host: &str, headers: &mut rama_http::HeaderMap) {
+        self.credential_broker.inject_request_headers(host, headers);
     }
 
     pub async fn current_cfg(&self) -> Result<NetworkProxyConfig> {
@@ -324,11 +337,14 @@ impl NetworkProxyState {
                 // Policy changes are operationally sensitive; logging diffs makes changes traceable
                 // without needing to dump full config blobs (which can include unrelated settings).
                 log_policy_changes(&previous_cfg, &new_state.config);
+                let credential_broker_enabled = new_state.config.network.credential_broker;
                 {
                     let mut guard = self.state.write().await;
                     new_state.blocked = guard.blocked.clone();
                     *guard = new_state;
                 }
+                self.credential_broker
+                    .set_enabled(credential_broker_enabled);
                 let source = self.reloader.source_label();
                 info!("reloaded config from {source}");
                 Ok(())
@@ -347,7 +363,10 @@ impl NetworkProxyState {
         log_policy_changes(&guard.config, &new_state.config);
         new_state.blocked = guard.blocked.clone();
         new_state.blocked_total = guard.blocked_total;
+        let credential_broker_enabled = new_state.config.network.credential_broker;
         *guard = new_state;
+        self.credential_broker
+            .set_enabled(credential_broker_enabled);
         info!("updated network proxy config state");
         Ok(())
     }
@@ -599,10 +618,14 @@ impl NetworkProxyState {
         Ok(evaluate_mitm_hooks(&guard.mitm_hooks, host, req))
     }
 
-    pub async fn host_has_mitm_hooks(&self, host: &str) -> Result<bool> {
+    pub async fn host_requires_mitm(&self, host: &str) -> Result<bool> {
         self.reload_if_needed().await?;
-        let guard = self.state.read().await;
-        Ok(guard.mitm_hooks.contains_key(&normalize_host(host)))
+        let normalized_host = normalize_host(host);
+        let host_has_mitm_hooks = {
+            let guard = self.state.read().await;
+            guard.mitm_hooks.contains_key(&normalized_host)
+        };
+        Ok(host_has_mitm_hooks || self.credential_broker.host_requires_mitm(&normalized_host))
     }
 
     pub async fn add_allowed_domain(&self, host: &str) -> Result<()> {
@@ -685,12 +708,15 @@ impl NetworkProxyState {
                     )
                 };
                 log_policy_changes(&previous_cfg, &new_state.config);
+                let credential_broker_enabled = new_state.config.network.credential_broker;
                 new_state.blocked = blocked;
                 new_state.blocked_total = blocked_total;
                 {
                     let mut guard = self.state.write().await;
                     *guard = new_state;
                 }
+                self.credential_broker
+                    .set_enabled(credential_broker_enabled);
                 let source = self.reloader.source_label();
                 info!("reloaded config from {source}");
                 Ok(())

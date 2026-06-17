@@ -7,6 +7,7 @@ use crate::tools::sandboxing::SandboxAttempt;
 use crate::tools::sandboxing::managed_network_for_sandbox_permissions;
 #[cfg(target_os = "macos")]
 use codex_network_proxy::CODEX_PROXY_GIT_SSH_COMMAND_MARKER;
+use codex_network_proxy::CREDENTIAL_BROKER_ACTIVE_ENV_KEY;
 use codex_network_proxy::CUSTOM_CA_ENV_KEYS;
 use codex_network_proxy::ConfigReloader;
 use codex_network_proxy::ConfigReloaderFuture;
@@ -541,6 +542,7 @@ fn maybe_wrap_shell_lc_with_snapshot_restores_proxy_env_from_process_env() {
          export PIP_PROXY='http://127.0.0.1:8080'\n\
          export HTTP_PROXY='http://127.0.0.1:8080'\n\
          export http_proxy='http://127.0.0.1:8080'\n\
+         export OPENAI_API_KEY='sk-real'\n\
          export GIT_SSH_COMMAND='ssh -o ProxyCommand=stale'\n",
     )
     .expect("write snapshot");
@@ -549,7 +551,7 @@ fn maybe_wrap_shell_lc_with_snapshot_restores_proxy_env_from_process_env() {
     let command = vec![
         "/bin/bash".to_string(),
         "-lc".to_string(),
-        "printf '%s\\n%s\\n%s\\n%s' \"$PIP_PROXY\" \"$HTTP_PROXY\" \"$http_proxy\" \"$GIT_SSH_COMMAND\""
+        "printf '%s\\n%s\\n%s\\n%s\\n%s' \"$PIP_PROXY\" \"$HTTP_PROXY\" \"$http_proxy\" \"$GIT_SSH_COMMAND\" \"$OPENAI_API_KEY\""
             .to_string(),
     ];
     let rewritten = maybe_wrap_shell_lc_with_snapshot(
@@ -557,16 +559,18 @@ fn maybe_wrap_shell_lc_with_snapshot_restores_proxy_env_from_process_env() {
         &session_shell,
         Some(&shell_snapshot),
         &HashMap::new(),
-        &HashMap::new(),
+        &HashMap::from([(CREDENTIAL_BROKER_ACTIVE_ENV_KEY.into(), "1".into())]),
         &RuntimePathPrepends::default(),
     );
     let output = Command::new(&rewritten[0])
         .args(&rewritten[1..])
         .env(PROXY_ACTIVE_ENV_KEY, "1")
+        .env(CREDENTIAL_BROKER_ACTIVE_ENV_KEY, "1")
         .env("PIP_PROXY", "http://127.0.0.1:4321")
         .env("HTTP_PROXY", "http://127.0.0.1:4321")
         .env("http_proxy", "http://127.0.0.1:4321")
         .env("GIT_SSH_COMMAND", "ssh -o ProxyCommand=fresh")
+        .env("OPENAI_API_KEY", "sk-brokered")
         .output()
         .expect("run rewritten command");
 
@@ -576,8 +580,15 @@ fn maybe_wrap_shell_lc_with_snapshot_restores_proxy_env_from_process_env() {
         "http://127.0.0.1:4321\n\
          http://127.0.0.1:4321\n\
          http://127.0.0.1:4321\n\
-         ssh -o ProxyCommand=stale"
+         ssh -o ProxyCommand=stale\n\
+         sk-brokered"
     );
+}
+
+#[test]
+fn broker_inactive_snapshot_exports_omit_credentials() {
+    let (captures, restores) = build_proxy_env_exports(&HashMap::new());
+    assert!(!format!("{captures}{restores}").contains("OPENAI_API_KEY"));
 }
 
 #[cfg(target_os = "macos")]

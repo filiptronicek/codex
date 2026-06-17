@@ -259,18 +259,18 @@ async fn http_connect_accept(
             return Err(text_response(StatusCode::INTERNAL_SERVER_ERROR, "error"));
         }
     };
-    let host_has_mitm_hooks = match app_state.host_has_mitm_hooks(&host).await {
-        Ok(has_hooks) => has_hooks,
+    let host_requires_mitm = match app_state.host_requires_mitm(&host).await {
+        Ok(requires_mitm) => requires_mitm,
         Err(err) => {
-            error!("failed to inspect MITM hooks for {host}: {err}");
+            error!("failed to inspect MITM requirements for {host}: {err}");
             return Err(text_response(StatusCode::INTERNAL_SERVER_ERROR, "error"));
         }
     };
-    let connect_needs_mitm = mode == NetworkMode::Limited || host_has_mitm_hooks;
+    let connect_needs_mitm = mode == NetworkMode::Limited || host_requires_mitm;
 
     if connect_needs_mitm && mitm_state.is_none() {
         // CONNECT needs MITM whenever HTTPS policy depends on inner-request inspection, either for
-        // limited-mode method enforcement or for host-specific MITM hooks.
+        // limited-mode method enforcement, host-specific MITM hooks, or credential injection.
         emit_http_block_decision_audit_event(
             &app_state,
             BlockDecisionAuditEventArgs {
@@ -306,7 +306,7 @@ async fn http_connect_accept(
             .await;
         let client = client.as_deref().unwrap_or_default();
         warn!(
-            "CONNECT blocked; MITM required to enforce HTTPS policy (client={client}, host={host}, mode={mode:?}, hooked_host={host_has_mitm_hooks})"
+            "CONNECT blocked; MITM required to enforce HTTPS policy (client={client}, host={host}, mode={mode:?}, host_requires_mitm={host_requires_mitm})"
         );
         return Err(blocked_text_with_details(REASON_MITM_REQUIRED, &details));
     }

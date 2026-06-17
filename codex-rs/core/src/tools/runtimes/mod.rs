@@ -19,6 +19,7 @@ use codex_network_proxy::PROXY_ENV_KEYS;
 #[cfg(target_os = "macos")]
 use codex_network_proxy::PROXY_GIT_SSH_COMMAND_ENV_KEY;
 use codex_network_proxy::is_managed_mitm_ca_trust_bundle_path;
+use codex_network_proxy::strip_brokered_credentials;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_sandboxing::SandboxCommand;
@@ -68,6 +69,7 @@ pub(crate) fn exec_env_for_sandbox_permissions(
 }
 
 pub(crate) fn strip_managed_proxy_env(env: &mut HashMap<String, String>) {
+    strip_brokered_credentials(env);
     for key in PROXY_ENV_KEYS {
         env.remove(*key);
     }
@@ -290,7 +292,7 @@ pub(crate) fn maybe_wrap_shell_lc_with_snapshot(
         override_env.insert(CODEX_THREAD_ID_ENV_VAR.to_string(), thread_id.clone());
     }
     let (override_captures, override_exports) = build_override_exports(&override_env);
-    let (proxy_captures, proxy_exports) = build_proxy_env_exports();
+    let (proxy_captures, proxy_exports) = build_proxy_env_exports(env);
     let runtime_path_prepend_exports =
         runtime_path_prepends.shell_exports_after_snapshot(explicit_env_overrides);
     let override_captures = join_shell_blocks([override_captures, proxy_captures]);
@@ -323,10 +325,11 @@ fn build_override_exports(explicit_env_overrides: &HashMap<String, String>) -> (
     build_override_exports_for_keys("__CODEX_SNAPSHOT_OVERRIDE", &keys)
 }
 
-fn build_proxy_env_exports() -> (String, String) {
+fn build_proxy_env_exports(env: &HashMap<String, String>) -> (String, String) {
     let mut keys = PROXY_ENV_KEYS
         .iter()
         .copied()
+        .chain(codex_network_proxy::brokered_credential_env_keys(env))
         .chain(CUSTOM_CA_ENV_KEYS)
         .filter(|key| is_valid_shell_variable_name(key))
         .collect::<Vec<_>>();
