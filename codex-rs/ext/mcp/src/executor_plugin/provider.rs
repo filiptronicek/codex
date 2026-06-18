@@ -2,15 +2,14 @@ use codex_config::McpServerConfig;
 use codex_config::McpServerTransportConfig;
 use codex_core_plugins::ResolvedExecutorPlugin;
 use codex_exec_server::ExecutorFileSystem;
-use codex_mcp::PluginMcpServerPlacement;
-use codex_mcp::parse_plugin_mcp_config;
+use codex_mcp::parse_executor_plugin_mcp_config;
 use codex_plugin::PluginResourceLocator;
 use codex_plugin::ResolvedPlugin;
 use codex_plugin::ResolvedPluginLocation;
 use codex_plugin::manifest::PluginManifestMcpServers;
 use codex_utils_path_uri::PathUri;
+use codex_utils_path_uri::PathUriParseError;
 use std::io;
-use std::path::PathBuf;
 use thiserror::Error;
 
 const DEFAULT_MCP_CONFIG_FILE: &str = ".mcp.json";
@@ -35,6 +34,15 @@ pub(super) enum ExecutorPluginMcpProviderError {
         path: PathUri,
         #[source]
         source: serde_json::Error,
+    },
+    #[error(
+        "failed to resolve MCP config path for selected plugin `{plugin_id}` at `{root}`: {source}"
+    )]
+    ResolveConfigPath {
+        plugin_id: String,
+        root: PathUri,
+        #[source]
+        source: PathUriParseError,
     },
 }
 
@@ -77,12 +85,20 @@ async fn load_from_file_system(
             object_config.clone(),
             plugin_root
                 .join(".codex-plugin/plugin.json")
-                .expect("static plugin manifest path must be valid"),
+                .map_err(|source| ExecutorPluginMcpProviderError::ResolveConfigPath {
+                    plugin_id: plugin_id.to_string(),
+                    root: plugin_root.clone(),
+                    source,
+                })?,
         ),
         None => {
             let config_path = plugin_root
                 .join(DEFAULT_MCP_CONFIG_FILE)
-                .expect("static MCP config path must be valid");
+                .map_err(|source| ExecutorPluginMcpProviderError::ResolveConfigPath {
+                    plugin_id: plugin_id.to_string(),
+                    root: plugin_root.clone(),
+                    source,
+                })?;
             let contents = match file_system
                 .read_file_text(&config_path, /*sandbox*/ None)
                 .await
@@ -102,17 +118,13 @@ async fn load_from_file_system(
             (contents, config_path)
         }
     };
-    let plugin_root_path = PathBuf::from(plugin_root.inferred_native_path_string());
-    let parsed = parse_plugin_mcp_config(
-        plugin_root_path.as_path(),
-        &contents,
-        PluginMcpServerPlacement::Environment { environment_id },
-    )
-    .map_err(|source| ExecutorPluginMcpProviderError::ParseConfig {
-        plugin_id: plugin_id.to_string(),
-        path: config_path,
-        source,
-    })?;
+    let parsed = parse_executor_plugin_mcp_config(plugin_root, &contents, environment_id).map_err(
+        |source| ExecutorPluginMcpProviderError::ParseConfig {
+            plugin_id: plugin_id.to_string(),
+            path: config_path,
+            source,
+        },
+    )?;
 
     for error in parsed.errors {
         tracing::warn!(

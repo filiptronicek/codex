@@ -63,16 +63,18 @@ impl ToolExecutor<ToolCall> for ReadTool {
             validate_handle("resource", &args.resource, MAX_HANDLE_BYTES)?;
 
             let catalog = self.context.catalog(&call.turn_id, args.authority).await;
-            let package_is_available = catalog.entries.iter().any(|entry| {
-                entry.enabled && entry.authority == authority && entry.id.0 == args.package
-            });
-            if !package_is_available {
+            let Some(entry) = catalog.entries.iter().find(|entry| {
+                entry.enabled
+                    && entry.authority == authority
+                    && entry.id.0 == args.package
+                    && entry.main_prompt.as_str() == args.resource
+            }) else {
                 return Err(FunctionCallError::RespondToModel(
                     "skill package is not available from the requested authority".to_string(),
                 ));
-            }
+            };
 
-            let requested_resource = SkillResourceId::new(args.resource);
+            let requested_resource = entry.main_prompt.clone();
             let result = self
                 .context
                 .thread_state

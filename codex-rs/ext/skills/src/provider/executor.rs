@@ -1,14 +1,14 @@
+use std::collections::HashSet;
+use std::collections::VecDeque;
+use std::io;
 use std::sync::Arc;
 
-use codex_core_skills::SkillMetadata;
-use codex_core_skills::filter_skill_load_outcome_for_product;
-use codex_core_skills::loader::SkillRoot;
-use codex_core_skills::loader::load_skills_from_roots;
+use codex_core_skills::loader::ParsedSkillFrontmatter;
+use codex_core_skills::loader::parse_skill_frontmatter_metadata;
 use codex_exec_server::EnvironmentManager;
+use codex_exec_server::ExecutorFileSystem;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::protocol::Product;
-use codex_protocol::protocol::SkillScope;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 
 use crate::catalog::SkillAuthority;
@@ -25,6 +25,10 @@ use crate::provider::SkillProvider;
 use crate::provider::SkillProviderFuture;
 use crate::provider::SkillReadRequest;
 use crate::provider::SkillSearchRequest;
+
+const SKILLS_FILENAME: &str = "SKILL.md";
+const MAX_SCAN_DEPTH: usize = 6;
+const MAX_SKILLS_DIRS_PER_ROOT: usize = 2000;
 
 /// Discovers and reads skills through the filesystem owned by an execution environment.
 #[derive(Clone, Debug)]
@@ -64,42 +68,12 @@ impl SkillProvider for ExecutorSkillProvider {
                     ));
                     continue;
                 };
-                let root_path = match executor_absolute_path(&path) {
-                    Ok(root_path) => root_path,
-                    Err(err) => {
-                        catalog.warnings.push(format!(
-                            "Selected capability root `{selected_root_id}` has invalid path `{path}`: {err}"
-                        ));
-                        continue;
-                    }
-                };
                 let file_system = environment.get_filesystem();
-                let outcome = filter_skill_load_outcome_for_product(
-                    load_skills_from_roots(
-                        [SkillRoot {
-                            path: root_path.clone(),
-                            scope: SkillScope::User,
-                            file_system: Arc::clone(&file_system),
-                            plugin_id: None,
-                            plugin_namespace: None,
-                            plugin_root: None,
-                        }],
-                        /*plugin_skill_snapshots*/ None,
-                    )
-                    .await,
-                    self.restriction_product,
-                );
-                catalog.warnings.extend(outcome.errors.iter().map(|err| {
-                    format!(
-                        "Failed to load executor skill at {}: {}",
-                        err.path.display(),
-                        err.message
-                    )
-                }));
-                for (skill, enabled) in outcome.skills_with_enabled() {
+                let outcome = load_executor_skills_from_root(file_system.as_ref(), &path).await;
+                catalog.warnings.extend(outcome.warnings);
+                for skill in outcome.skills {
                     catalog.push_entry(catalog_entry_from_skill(
-                        skill,
-                        enabled,
+                        &skill,
                         authority.clone(),
                         &selected_root_id,
                         &environment_id,
@@ -134,10 +108,9 @@ impl SkillProvider for ExecutorSkillProvider {
                     "executor skill resource references unavailable environment `{environment_id}`"
                 )));
             };
-            let resource_path = PathUri::from_abs_path(resource_path);
             let contents = environment
                 .get_filesystem()
-                .read_file_text(&resource_path, /*sandbox*/ None)
+                .read_file_text(resource_path, /*sandbox*/ None)
                 .await
                 .map_err(|err| {
                     SkillProviderError::new(format!(
@@ -158,44 +131,223 @@ impl SkillProvider for ExecutorSkillProvider {
     }
 }
 
+#[derive(Debug, Default)]
+struct ExecutorSkillLoadOutcome {
+    skills: Vec<ExecutorSkill>,
+    warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ExecutorSkill {
+    path: PathUri,
+    name: String,
+    description: String,
+    short_description: Option<String>,
+}
+
+async fn load_executor_skills_from_root(
+    file_system: &dyn ExecutorFileSystem,
+    root: &PathUri,
+) -> ExecutorSkillLoadOutcome {
+    let mut outcome = ExecutorSkillLoadOutcome::default();
+    let root = canonicalize_for_skill_identity(file_system, root).await;
+    match file_system.get_metadata(&root, /*sandbox*/ None).await {
+        Ok(metadata) if metadata.is_directory => {}
+        Ok(_) => return outcome,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return outcome,
+        Err(err) => {
+            outcome
+                .warnings
+                .push(format!("Failed to load executor skills at {root}: {err}"));
+            return outcome;
+        }
+    }
+
+    let mut visited_dirs: HashSet<PathUri> = HashSet::new();
+    visited_dirs.insert(root.clone());
+    let mut queue: VecDeque<(PathUri, usize)> = VecDeque::from([(root.clone(), 0)]);
+    let mut truncated_by_dir_limit = false;
+
+    while let Some((dir, depth)) = queue.pop_front() {
+        let entries = match file_system.read_directory(&dir, /*sandbox*/ None).await {
+            Ok(entries) => entries,
+            Err(err) => {
+                outcome
+                    .warnings
+                    .push(format!("Failed to read executor skills dir {dir}: {err}"));
+                continue;
+            }
+        };
+
+        for entry in entries {
+            let file_name = entry.file_name;
+            if file_name.starts_with('.') {
+                continue;
+            }
+            let path = match dir.join(&file_name) {
+                Ok(path) => path,
+                Err(err) => {
+                    outcome.warnings.push(format!(
+                        "Failed to resolve executor skill path {dir}/{file_name}: {err}"
+                    ));
+                    continue;
+                }
+            };
+            let metadata = match file_system.get_metadata(&path, /*sandbox*/ None).await {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    outcome
+                        .warnings
+                        .push(format!("Failed to stat executor skill path {path}: {err}"));
+                    continue;
+                }
+            };
+
+            if metadata.is_symlink {
+                match file_system.read_directory(&path, /*sandbox*/ None).await {
+                    Ok(_) => {
+                        enqueue_executor_skill_dir(
+                            file_system,
+                            &mut queue,
+                            &mut visited_dirs,
+                            &mut truncated_by_dir_limit,
+                            path,
+                            depth + 1,
+                        )
+                        .await;
+                    }
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            io::ErrorKind::NotADirectory | io::ErrorKind::NotFound
+                        ) => {}
+                    Err(err) => {
+                        outcome
+                            .warnings
+                            .push(format!("Failed to read executor symlink dir {path}: {err}"));
+                    }
+                }
+                continue;
+            }
+
+            if metadata.is_directory {
+                enqueue_executor_skill_dir(
+                    file_system,
+                    &mut queue,
+                    &mut visited_dirs,
+                    &mut truncated_by_dir_limit,
+                    path,
+                    depth + 1,
+                )
+                .await;
+                continue;
+            }
+
+            if metadata.is_file && file_name == SKILLS_FILENAME {
+                match parse_executor_skill_file(file_system, &path).await {
+                    Ok(skill) => outcome.skills.push(skill),
+                    Err(message) => outcome.warnings.push(format!(
+                        "Failed to load executor skill at {path}: {message}"
+                    )),
+                }
+            }
+        }
+    }
+
+    if truncated_by_dir_limit {
+        tracing::warn!(
+            "executor skills scan truncated after {} directories (root: {})",
+            MAX_SKILLS_DIRS_PER_ROOT,
+            root
+        );
+    }
+
+    outcome
+}
+
+async fn enqueue_executor_skill_dir(
+    file_system: &dyn ExecutorFileSystem,
+    queue: &mut VecDeque<(PathUri, usize)>,
+    visited_dirs: &mut HashSet<PathUri>,
+    truncated_by_dir_limit: &mut bool,
+    path: PathUri,
+    depth: usize,
+) {
+    if depth > MAX_SCAN_DEPTH {
+        return;
+    }
+    if visited_dirs.len() >= MAX_SKILLS_DIRS_PER_ROOT {
+        *truncated_by_dir_limit = true;
+        return;
+    }
+    let path = canonicalize_for_skill_identity(file_system, &path).await;
+    if visited_dirs.insert(path.clone()) {
+        queue.push_back((path, depth));
+    }
+}
+
+async fn parse_executor_skill_file(
+    file_system: &dyn ExecutorFileSystem,
+    path: &PathUri,
+) -> Result<ExecutorSkill, String> {
+    let contents = file_system
+        .read_file_text(path, /*sandbox*/ None)
+        .await
+        .map_err(|err| format!("failed to read file: {err}"))?;
+    let ParsedSkillFrontmatter {
+        name,
+        description,
+        short_description,
+    } = parse_skill_frontmatter_metadata(&contents, || default_skill_name(path))?;
+    let path = canonicalize_for_skill_identity(file_system, path).await;
+
+    Ok(ExecutorSkill {
+        path,
+        name,
+        description,
+        short_description,
+    })
+}
+
+async fn canonicalize_for_skill_identity(
+    file_system: &dyn ExecutorFileSystem,
+    path: &PathUri,
+) -> PathUri {
+    file_system
+        .canonicalize(path, /*sandbox*/ None)
+        .await
+        .unwrap_or_else(|_| path.clone())
+}
+
+fn default_skill_name(path: &PathUri) -> String {
+    path.parent()
+        .and_then(|parent| parent.basename())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "skill".to_string())
+}
+
 fn catalog_entry_from_skill(
-    skill: &SkillMetadata,
-    enabled: bool,
+    skill: &ExecutorSkill,
     authority: SkillAuthority,
     selected_root_id: &str,
     environment_id: &str,
 ) -> SkillCatalogEntry {
-    let skill_path = skill.path_to_skills_md.to_string_lossy().into_owned();
+    let skill_path = skill.path.inferred_native_path_string();
     let normalized_path = skill_path.replace('\\', "/");
     let display_path = format!(
         "skill://{selected_root_id}/{}",
         normalized_path.trim_start_matches('/')
     );
-    let mut entry = SkillCatalogEntry::new(
+    let entry = SkillCatalogEntry::new(
         SkillPackageId(display_path.clone()),
         authority,
         skill.name.clone(),
         skill.description.clone(),
-        SkillResourceId::environment(
-            display_path.clone(),
-            environment_id,
-            skill.path_to_skills_md.clone(),
-        ),
+        SkillResourceId::environment(display_path.clone(), environment_id, skill.path.clone()),
     )
     .with_short_description(skill.short_description.clone())
     .with_display_path(display_path)
-    .with_dependencies(skill.dependencies.clone());
-
-    if !enabled {
-        entry = entry.disabled();
-    }
-    if !skill.allows_implicit_invocation() {
-        entry = entry.hidden_from_prompt();
-    }
+    .with_dependencies(None);
 
     entry
-}
-
-fn executor_absolute_path(path: &PathUri) -> std::io::Result<AbsolutePathBuf> {
-    path.to_abs_path()
 }

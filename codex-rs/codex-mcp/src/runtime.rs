@@ -5,6 +5,7 @@
 //! tiny shared metrics helper. Transport startup and orchestration live in
 //! [`crate::rmcp_client`] and [`crate::connection_manager`].
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -100,13 +101,32 @@ fn ensure_remote_stdio_cwd(
             "remote stdio MCP server `{server_name}` requires an absolute cwd"
         ));
     };
-    if cwd.is_absolute() {
+    if remote_stdio_cwd_is_absolute(cwd) {
         return Ok(());
     }
     Err(format!(
         "remote stdio MCP server `{server_name}` requires an absolute cwd, got `{}`",
         cwd.display()
     ))
+}
+
+fn remote_stdio_cwd_is_absolute(cwd: &Path) -> bool {
+    if cwd.is_absolute() {
+        return true;
+    }
+    let cwd = cwd.to_string_lossy();
+    PathUri::parse(&cwd).is_ok() || native_path_str_is_absolute(&cwd)
+}
+
+fn native_path_str_is_absolute(path: &str) -> bool {
+    path.starts_with('/')
+        || path.starts_with(r"\\")
+        || matches!(
+            path.as_bytes(),
+            [drive, b':', separator, ..]
+                if drive.is_ascii_alphabetic()
+                    && matches!(separator, b'/' | b'\\')
+        )
 }
 
 pub(crate) fn emit_duration(metric: &str, duration: Duration, tags: &[(&str, &str)]) {
@@ -247,6 +267,32 @@ mod tests {
             };
             assert!(resolved_runtime.is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn remote_stdio_accepts_foreign_absolute_cwd() {
+        let runtime_context = McpRuntimeContext::new(
+            Arc::new(
+                EnvironmentManager::create_for_tests(
+                    Some("ws://127.0.0.1:8765".to_string()),
+                    /*local_runtime_paths*/ None,
+                )
+                .await,
+            ),
+            PathBuf::from("/tmp"),
+        );
+        let mut remote_stdio = stdio_server("remote");
+        let McpServerTransportConfig::Stdio { cwd, .. } = &mut remote_stdio.transport else {
+            unreachable!("stdio helper should build stdio transport");
+        };
+        *cwd = Some(PathBuf::from(r"C:\plugins\demo"));
+
+        let resolved_runtime =
+            match runtime_context.resolve_server_environment("stdio", &remote_stdio) {
+                Ok(resolved_runtime) => resolved_runtime,
+                Err(error) => panic!("foreign cwd should resolve: {error}"),
+            };
+        assert!(resolved_runtime.is_some());
     }
 
     #[tokio::test]

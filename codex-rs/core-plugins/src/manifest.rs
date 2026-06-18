@@ -577,6 +577,17 @@ fn resolve_manifest_path_uri(
         tracing::warn!("ignoring {field}: path must not be `./`");
         return None;
     }
+    if uri_manifest_relative_path_has_parent_component(relative_path) {
+        tracing::warn!("ignoring {field}: path must not contain '..'");
+        return None;
+    }
+    if relative_path.starts_with('/')
+        || relative_path.starts_with('\\')
+        || has_windows_drive_prefix(relative_path)
+    {
+        tracing::warn!("ignoring {field}: path must stay within the plugin root");
+        return None;
+    }
 
     let resolved = match plugin_root.join(relative_path) {
         Ok(resolved) => resolved,
@@ -590,6 +601,14 @@ fn resolve_manifest_path_uri(
         return None;
     }
     Some(resolved)
+}
+
+fn uri_manifest_relative_path_has_parent_component(path: &str) -> bool {
+    path.split(['/', '\\']).any(|component| component == "..")
+}
+
+fn has_windows_drive_prefix(path: &str) -> bool {
+    matches!(path.as_bytes(), [drive, b':', ..] if drive.is_ascii_alphabetic())
 }
 
 #[cfg(test)]
@@ -839,5 +858,45 @@ mod tests {
         .expect("valid expected descriptor");
 
         assert_eq!(executor_plugin, expected_plugin);
+    }
+
+    #[test]
+    fn uri_manifest_rejects_parent_components_like_host_manifest() {
+        let temp_dir = tempdir().expect("tempdir");
+        let plugin_root = temp_dir.path().join("demo-plugin");
+        let manifest_path = plugin_root.join(".codex-plugin/plugin.json");
+        let contents = r#"{
+  "name": "demo-plugin",
+  "interface": {
+    "displayName": "Demo Plugin",
+    "composerIcon": "./assets/../icon.svg"
+  }
+}"#;
+        let host_manifest = super::parse_plugin_manifest(&plugin_root, &manifest_path, contents)
+            .expect("host manifest");
+        let plugin_root =
+            AbsolutePathBuf::from_absolute_path_checked(plugin_root).expect("absolute root");
+        let plugin_root_uri = PathUri::from_abs_path(&plugin_root);
+        let manifest_path_uri = plugin_root_uri
+            .join(".codex-plugin/plugin.json")
+            .expect("manifest URI");
+        let uri_manifest =
+            super::parse_plugin_manifest_uri(&plugin_root_uri, &manifest_path_uri, contents)
+                .expect("URI manifest");
+
+        assert_eq!(
+            host_manifest
+                .interface
+                .as_ref()
+                .and_then(|interface| interface.composer_icon.as_ref()),
+            None
+        );
+        assert_eq!(
+            uri_manifest
+                .interface
+                .as_ref()
+                .and_then(|interface| interface.composer_icon.as_ref()),
+            None
+        );
     }
 }

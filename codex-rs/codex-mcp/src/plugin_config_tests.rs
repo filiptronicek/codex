@@ -1,12 +1,14 @@
 use super::PluginMcpConfigParseOutcome;
 use super::PluginMcpServerParseError;
 use super::PluginMcpServerPlacement;
+use super::parse_executor_plugin_mcp_config;
 use super::parse_plugin_mcp_config;
 use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::McpServerConfig;
 use codex_config::McpServerEnvVar;
 use codex_config::McpServerOAuthConfig;
 use codex_config::McpServerTransportConfig;
+use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -182,6 +184,33 @@ fn environment_placement_resolves_relative_cwd_beneath_plugin_root() {
                     "demo-mcp",
                     "executor-1",
                     &plugin_root.join("scripts"),
+                    Vec::new(),
+                ),
+            )]),
+            errors: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn executor_environment_placement_resolves_foreign_uri_cwd() {
+    let plugin_root = PathUri::parse("file:///C:/plugins/demo").expect("plugin root URI");
+    let outcome = parse_executor_plugin_mcp_config(
+        &plugin_root,
+        r#"{"demo":{"command":"demo-mcp","cwd":"scripts"}}"#,
+        "executor-1",
+    )
+    .expect("parse plugin MCP config");
+
+    assert_eq!(
+        outcome,
+        PluginMcpConfigParseOutcome {
+            servers: BTreeMap::from([(
+                "demo".to_string(),
+                stdio_server(
+                    "demo-mcp",
+                    "executor-1",
+                    Path::new(r"C:\plugins\demo\scripts"),
                     Vec::new(),
                 ),
             )]),

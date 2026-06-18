@@ -35,6 +35,7 @@ use codex_exec_server::ExecEnvPolicy;
 use codex_exec_server::ExecParams;
 use codex_exec_server::ExecProcess;
 use codex_protocol::config_types::ShellEnvironmentPolicyInherit;
+use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 #[cfg(unix)]
 use codex_utils_pty::process_group::kill_process_group;
@@ -488,7 +489,7 @@ impl ExecutorStdioServerLauncher {
         // before sending an executor request.
         let argv = Self::process_api_argv(&program, &args).map_err(io::Error::other)?;
         let env = Self::process_api_env(envs).map_err(io::Error::other)?;
-        let cwd = PathUri::from_path(cwd)?;
+        let cwd = path_uri_from_stdio_cwd(&cwd)?;
         let process_id = ExecutorProcessTransport::next_process_id();
         // Start the MCP server process on the executor with raw pipes. `tty=false`
         // keeps stdout as a clean protocol stream, while `pipe_stdin=true` lets
@@ -574,6 +575,26 @@ impl ExecutorStdioServerLauncher {
             exclude: Vec::new(),
             r#set: HashMap::new(),
             include_only,
+        }
+    }
+}
+
+fn path_uri_from_stdio_cwd(cwd: &PathBuf) -> io::Result<PathUri> {
+    match PathUri::from_path(cwd) {
+        Ok(cwd) => Ok(cwd),
+        Err(native_error) => {
+            let path = cwd.to_string_lossy().into_owned();
+            let legacy_path: LegacyAppPathString =
+                serde_json::from_value(serde_json::Value::String(path.clone()))
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+            legacy_path.to_inferred_path_uri().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "cwd `{path}` is not an absolute path URI or native path: {native_error}"
+                    ),
+                )
+            })
         }
     }
 }

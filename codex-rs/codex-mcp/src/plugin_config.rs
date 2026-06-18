@@ -1,13 +1,13 @@
 use codex_config::McpServerConfig;
 use codex_config::McpServerEnvVar;
 use codex_config::McpServerTransportConfig;
+use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::path::Component;
 use std::path::Path;
-use std::path::PathBuf;
 use tracing::warn;
 
 /// Placement applied while normalizing MCP servers declared by a plugin.
@@ -64,6 +64,62 @@ pub fn parse_plugin_mcp_config(
     contents: &str,
     placement: PluginMcpServerPlacement<'_>,
 ) -> Result<PluginMcpConfigParseOutcome, serde_json::Error> {
+    parse_plugin_mcp_config_with_root(PluginMcpRoot::Host(plugin_root), contents, placement)
+}
+
+/// Parses executor-owned plugin MCP config without interpreting the plugin root
+/// as a path on the orchestrator host.
+pub fn parse_executor_plugin_mcp_config(
+    plugin_root: &PathUri,
+    contents: &str,
+    environment_id: &str,
+) -> Result<PluginMcpConfigParseOutcome, serde_json::Error> {
+    parse_plugin_mcp_config_with_root(
+        PluginMcpRoot::Uri(plugin_root),
+        contents,
+        PluginMcpServerPlacement::Environment { environment_id },
+    )
+}
+
+#[derive(Clone, Copy)]
+enum PluginMcpRoot<'a> {
+    Host(&'a Path),
+    Uri(&'a PathUri),
+}
+
+impl PluginMcpRoot<'_> {
+    fn display(self) -> String {
+        match self {
+            Self::Host(path) => path.display().to_string(),
+            Self::Uri(path) => path.to_string(),
+        }
+    }
+
+    fn environment_cwd(self, configured_cwd: Option<&str>) -> Result<String, String> {
+        match configured_cwd {
+            Some(cwd) => executor_plugin_cwd(self, cwd),
+            None => Ok(match self {
+                Self::Host(path) => path.to_string_lossy().into_owned(),
+                Self::Uri(path) => path.inferred_native_path_string(),
+            }),
+        }
+    }
+
+    fn declared_cwd(self, cwd: &str) -> Option<String> {
+        match self {
+            Self::Host(plugin_root) if !Path::new(cwd).is_absolute() => {
+                Some(plugin_root.join(cwd).display().to_string())
+            }
+            Self::Host(_) | Self::Uri(_) => None,
+        }
+    }
+}
+
+fn parse_plugin_mcp_config_with_root(
+    plugin_root: PluginMcpRoot<'_>,
+    contents: &str,
+    placement: PluginMcpServerPlacement<'_>,
+) -> Result<PluginMcpConfigParseOutcome, serde_json::Error> {
     let parsed = serde_json::from_str::<PluginMcpFile>(contents)?;
     let mut outcome = PluginMcpConfigParseOutcome::default();
 
@@ -82,7 +138,7 @@ pub fn parse_plugin_mcp_config(
 }
 
 fn normalize_plugin_mcp_server(
-    plugin_root: &Path,
+    plugin_root: PluginMcpRoot<'_>,
     value: JsonValue,
     placement: PluginMcpServerPlacement<'_>,
 ) -> Result<McpServerConfig, String> {
@@ -96,15 +152,11 @@ fn normalize_plugin_mcp_server(
             match object.remove("cwd") {
                 Some(JsonValue::String(cwd)) => object.insert(
                     "cwd".to_string(),
-                    JsonValue::String(
-                        executor_plugin_cwd(plugin_root, &cwd)?
-                            .to_string_lossy()
-                            .into_owned(),
-                    ),
+                    JsonValue::String(plugin_root.environment_cwd(Some(&cwd))?),
                 ),
                 Some(JsonValue::Null) | None => object.insert(
                     "cwd".to_string(),
-                    JsonValue::String(plugin_root.to_string_lossy().into_owned()),
+                    JsonValue::String(plugin_root.environment_cwd(None)?),
                 ),
                 Some(value) => object.insert("cwd".to_string(), value),
             };
@@ -119,23 +171,61 @@ fn normalize_plugin_mcp_server(
     Ok(config)
 }
 
-fn executor_plugin_cwd(plugin_root: &Path, configured_cwd: &str) -> Result<PathBuf, String> {
-    let cwd = Path::new(configured_cwd);
-    if cwd.is_absolute() {
-        return Ok(cwd.to_path_buf());
+fn executor_plugin_cwd(
+    plugin_root: PluginMcpRoot<'_>,
+    configured_cwd: &str,
+) -> Result<String, String> {
+    if let Ok(cwd) = PathUri::parse(configured_cwd) {
+        return Ok(cwd.inferred_native_path_string());
     }
-    if cwd.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
+    if native_path_str_is_absolute(configured_cwd) {
+        return Ok(configured_cwd.to_string());
+    }
+    let cwd = Path::new(configured_cwd);
+    if cwd
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+        || relative_path_has_parent_component(configured_cwd)
+        || configured_cwd.starts_with('/')
+        || configured_cwd.starts_with('\\')
+        || has_windows_drive_prefix(configured_cwd)
+    {
         return Err(format!(
             "relative cwd `{configured_cwd}` must remain within plugin root `{}`",
             plugin_root.display()
         ));
     }
-    Ok(plugin_root.join(cwd))
+    match plugin_root {
+        PluginMcpRoot::Host(path) => Ok(path.join(cwd).to_string_lossy().into_owned()),
+        PluginMcpRoot::Uri(path) => path
+            .join(configured_cwd)
+            .map(|cwd| cwd.inferred_native_path_string())
+            .map_err(|err| {
+                format!(
+                    "relative cwd `{configured_cwd}` must remain within plugin root `{}`: {err}",
+                    plugin_root.display()
+                )
+            }),
+    }
+}
+
+fn native_path_str_is_absolute(path: &str) -> bool {
+    path.starts_with('/')
+        || path.starts_with(r"\\")
+        || matches!(
+            path.as_bytes(),
+            [drive, b':', separator, ..]
+                if drive.is_ascii_alphabetic()
+                    && matches!(separator, b'/' | b'\\')
+        )
+}
+
+fn has_windows_drive_prefix(path: &str) -> bool {
+    matches!(path.as_bytes(), [drive, b':', ..] if drive.is_ascii_alphabetic())
+}
+
+fn relative_path_has_parent_component(path: &str) -> bool {
+    path.split(['/', '\\']).any(|component| component == "..")
 }
 
 fn bind_environment_env_vars(config: &mut McpServerConfig) -> Result<(), String> {
@@ -175,7 +265,7 @@ fn bind_environment_env_vars(config: &mut McpServerConfig) -> Result<(), String>
 }
 
 fn normalize_plugin_mcp_server_value(
-    plugin_root: &Path,
+    plugin_root: PluginMcpRoot<'_>,
     value: JsonValue,
     placement: PluginMcpServerPlacement<'_>,
 ) -> JsonMap<String, JsonValue> {
@@ -188,8 +278,9 @@ fn normalize_plugin_mcp_server_value(
         match transport_type.as_str() {
             "http" | "streamable_http" | "streamable-http" | "stdio" => {}
             other => {
+                let plugin_display = plugin_root.display();
                 warn!(
-                    plugin = %plugin_root.display(),
+                    plugin = %plugin_display,
                     transport = other,
                     "plugin MCP server uses an unknown transport type"
                 );
@@ -199,8 +290,9 @@ fn normalize_plugin_mcp_server_value(
 
     if let Some(JsonValue::Object(mut oauth)) = object.remove("oauth") {
         if oauth.remove("callbackPort").is_some() {
+            let plugin_display = plugin_root.display();
             warn!(
-                plugin = %plugin_root.display(),
+                plugin = %plugin_display,
                 "plugin MCP server OAuth callbackPort is ignored; Codex uses global MCP OAuth callback settings"
             );
         }
@@ -216,12 +308,9 @@ fn normalize_plugin_mcp_server_value(
 
     if matches!(placement, PluginMcpServerPlacement::Declared)
         && let Some(JsonValue::String(cwd)) = object.get("cwd")
-        && !Path::new(cwd).is_absolute()
+        && let Some(resolved_cwd) = plugin_root.declared_cwd(cwd)
     {
-        object.insert(
-            "cwd".to_string(),
-            JsonValue::String(plugin_root.join(cwd).display().to_string()),
-        );
+        object.insert("cwd".to_string(), JsonValue::String(resolved_cwd));
     }
 
     object

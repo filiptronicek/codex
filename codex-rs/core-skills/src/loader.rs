@@ -42,11 +42,11 @@ struct SkillFrontmatter {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
-    metadata: SkillFrontmatterMetadata,
+    metadata: SkillFrontmatterAttributes,
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct SkillFrontmatterMetadata {
+struct SkillFrontmatterAttributes {
     #[serde(default, rename = "short-description")]
     short_description: Option<String>,
 }
@@ -101,6 +101,13 @@ struct DependencyTool {
     transport: Option<String>,
     command: Option<String>,
     url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedSkillFrontmatter {
+    pub name: String,
+    pub description: String,
+    pub short_description: Option<String>,
 }
 
 const SKILLS_FILENAME: &str = "SKILL.md";
@@ -641,8 +648,47 @@ async fn parse_skill_file(
         .read_file_text(&path_uri, /*sandbox*/ None)
         .await
         .map_err(SkillParseError::Read)?;
+    let ParsedSkillFrontmatter {
+        name: base_name,
+        description,
+        short_description,
+    } = parse_skill_frontmatter_metadata_inner(&contents, || default_skill_name(path))?;
+    let name = namespaced_skill_name(fs, path, &base_name, plugin_namespace).await;
+    let LoadedSkillMetadata {
+        interface,
+        dependencies,
+        policy,
+    } = load_skill_metadata(fs, path, plugin_root).await;
 
-    let frontmatter = extract_frontmatter(&contents).ok_or(SkillParseError::MissingFrontmatter)?;
+    validate_len(&name, MAX_QUALIFIED_NAME_LEN, "qualified name")?;
+
+    let resolved_path = canonicalize_for_skill_identity(fs, path).await;
+
+    Ok(SkillMetadata {
+        name,
+        description,
+        short_description,
+        interface,
+        dependencies,
+        policy,
+        path_to_skills_md: resolved_path,
+        scope,
+        plugin_id: plugin_id.map(str::to_string),
+    })
+}
+
+pub fn parse_skill_frontmatter_metadata(
+    contents: &str,
+    default_name: impl FnOnce() -> String,
+) -> Result<ParsedSkillFrontmatter, String> {
+    parse_skill_frontmatter_metadata_inner(contents, default_name).map_err(|err| err.to_string())
+}
+
+fn parse_skill_frontmatter_metadata_inner(
+    contents: &str,
+    default_name: impl FnOnce() -> String,
+) -> Result<ParsedSkillFrontmatter, SkillParseError> {
+    let frontmatter = extract_frontmatter(contents).ok_or(SkillParseError::MissingFrontmatter)?;
 
     let parsed: SkillFrontmatter = match serde_yaml::from_str(&frontmatter) {
         Ok(parsed) => Ok(parsed),
@@ -658,13 +704,12 @@ async fn parse_skill_file(
     }
     .map_err(SkillParseError::InvalidYaml)?;
 
-    let base_name = parsed
+    let name = parsed
         .name
         .as_deref()
         .map(sanitize_single_line)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| default_skill_name(path));
-    let name = namespaced_skill_name(fs, path, &base_name, plugin_namespace).await;
+        .unwrap_or_else(default_name);
     let description = parsed
         .description
         .as_deref()
@@ -676,14 +721,8 @@ async fn parse_skill_file(
         .as_deref()
         .map(sanitize_single_line)
         .filter(|value| !value.is_empty());
-    let LoadedSkillMetadata {
-        interface,
-        dependencies,
-        policy,
-    } = load_skill_metadata(fs, path, plugin_root).await;
 
-    validate_len(&base_name, MAX_NAME_LEN, "name")?;
-    validate_len(&name, MAX_QUALIFIED_NAME_LEN, "qualified name")?;
+    validate_len(&name, MAX_NAME_LEN, "name")?;
     validate_len(&description, MAX_DESCRIPTION_LEN, "description")?;
     if let Some(short_description) = short_description.as_deref() {
         validate_len(
@@ -693,18 +732,10 @@ async fn parse_skill_file(
         )?;
     }
 
-    let resolved_path = canonicalize_for_skill_identity(fs, path).await;
-
-    Ok(SkillMetadata {
+    Ok(ParsedSkillFrontmatter {
         name,
         description,
         short_description,
-        interface,
-        dependencies,
-        policy,
-        path_to_skills_md: resolved_path,
-        scope,
-        plugin_id: plugin_id.map(str::to_string),
     })
 }
 
