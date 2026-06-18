@@ -14,9 +14,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::McpAuthStatusEntry;
-use crate::codex_apps::CodexAppsToolsCacheContext;
-use crate::codex_apps::CodexAppsToolsCacheKey;
-use crate::codex_apps::write_cached_codex_apps_tools_if_needed;
+use crate::codex_apps_cache::CodexAppsToolsCache;
+use crate::codex_apps_cache::CodexAppsToolsCacheKey;
+use crate::codex_apps_cache::CodexAppsToolsFetchSource;
 use crate::elicitation::ElicitationRequestManager;
 use crate::elicitation::ElicitationReviewerHandle;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
@@ -28,6 +28,7 @@ use crate::rmcp_client::MCP_TOOLS_LIST_DURATION_METRIC;
 use crate::rmcp_client::ManagedClient;
 use crate::rmcp_client::StartupOutcomeError;
 use crate::rmcp_client::list_tools_for_client_uncached;
+use crate::rmcp_client::resolve_bearer_token;
 use crate::runtime::McpRuntimeContext;
 use crate::runtime::emit_duration;
 use crate::server::EffectiveMcpServer;
@@ -129,6 +130,7 @@ impl McpConnectionManager {
         initial_permission_profile: PermissionProfile,
         runtime_context: McpRuntimeContext,
         codex_home: PathBuf,
+        codex_apps_tools_cache: CodexAppsToolsCache,
         codex_apps_tools_cache_key: CodexAppsToolsCacheKey,
         host_owned_codex_apps_enabled: bool,
         prefix_mcp_tool_names: bool,
@@ -173,24 +175,34 @@ impl McpConnectionManager {
                 },
             )
             .await;
+            let resolved_bearer_token =
+                resolve_bearer_token_for_server(&server_name, &server).map_err(Into::into);
+            let configured_config = server.configured_config();
             let codex_apps_tools_cache_context = if server_name == CODEX_APPS_MCP_SERVER_NAME {
-                Some(CodexAppsToolsCacheContext {
-                    codex_home: codex_home.clone(),
-                    user_key: codex_apps_tools_cache_key.clone(),
-                })
+                resolved_bearer_token
+                    .as_ref()
+                    .ok()
+                    .and_then(|resolved_bearer_token| {
+                        configured_config.map(|configured_config| {
+                            codex_apps_tools_cache.context(
+                                codex_home.clone(),
+                                codex_apps_tools_cache_key.clone(),
+                                configured_config,
+                                resolved_bearer_token.as_deref(),
+                            )
+                        })
+                    })
             } else {
                 None
             };
             let uses_env_bearer_token =
-                server
-                    .configured_config()
-                    .is_some_and(|config| match &config.transport {
-                        McpServerTransportConfig::StreamableHttp {
-                            bearer_token_env_var,
-                            ..
-                        } => bearer_token_env_var.is_some(),
-                        McpServerTransportConfig::Stdio { .. } => false,
-                    });
+                configured_config.is_some_and(|config| match &config.transport {
+                    McpServerTransportConfig::StreamableHttp {
+                        bearer_token_env_var,
+                        ..
+                    } => bearer_token_env_var.is_some(),
+                    McpServerTransportConfig::Stdio { .. } => false,
+                });
             let runtime_auth_provider =
                 if server_name == CODEX_APPS_MCP_SERVER_NAME && !uses_env_bearer_token {
                     codex_apps_auth_provider.clone()
@@ -209,6 +221,7 @@ impl McpConnectionManager {
                 Arc::clone(&tool_plugin_provenance),
                 runtime_context.clone(),
                 runtime_auth_provider,
+                resolved_bearer_token,
                 client_elicitation_capability.clone(),
                 supports_openai_form_elicitation,
             );
@@ -456,7 +469,7 @@ impl McpConnectionManager {
     pub async fn list_all_tools(&self) -> Vec<ToolInfo> {
         let mut tools = Vec::new();
         for (server_name, managed_client) in &self.clients {
-            let has_cached_tool_info_snapshot = managed_client.cached_tool_info_snapshot.is_some();
+            let has_cached_tool_info_snapshot = managed_client.has_cached_tool_info_snapshot();
             let startup_complete = managed_client
                 .startup_complete
                 .load(std::sync::atomic::Ordering::Acquire);
@@ -508,6 +521,10 @@ impl McpConnectionManager {
 
         let list_start = Instant::now();
         let fetch_start = Instant::now();
+        let fetch_ticket = managed_client
+            .codex_apps_tools_cache_context
+            .as_ref()
+            .map(|cache_context| cache_context.begin_fetch(CodexAppsToolsFetchSource::HardRefresh));
         let tools = list_tools_for_client_uncached(
             CODEX_APPS_MCP_SERVER_NAME,
             &managed_client.client,
@@ -524,12 +541,16 @@ impl McpConnectionManager {
             &[],
         );
 
-        write_cached_codex_apps_tools_if_needed(
-            CODEX_APPS_MCP_SERVER_NAME,
-            managed_client.codex_apps_tools_cache_context.as_ref(),
-            &managed_client.server_info,
-            &tools,
-        );
+        let tools =
+            match (
+                managed_client.codex_apps_tools_cache_context.as_ref(),
+                fetch_ticket,
+            ) {
+                (Some(cache_context), Some(fetch_ticket)) => cache_context
+                    .publish_if_newest_accepted(fetch_ticket, &managed_client.server_info, tools),
+                (None, None) => tools,
+                _ => unreachable!("Codex Apps fetch ticket requires cache context"),
+            };
         emit_duration(
             MCP_TOOLS_LIST_DURATION_METRIC,
             list_start.elapsed(),
@@ -845,6 +866,22 @@ impl Drop for McpConnectionManager {
     fn drop(&mut self) {
         self.startup_cancellation_token.cancel();
         self.clients.clear();
+    }
+}
+
+fn resolve_bearer_token_for_server(
+    server_name: &str,
+    server: &EffectiveMcpServer,
+) -> Result<Option<String>> {
+    let Some(config) = server.configured_config() else {
+        return Ok(None);
+    };
+    match &config.transport {
+        McpServerTransportConfig::StreamableHttp {
+            bearer_token_env_var,
+            ..
+        } => resolve_bearer_token(server_name, bearer_token_env_var.as_deref()),
+        McpServerTransportConfig::Stdio { .. } => Ok(None),
     }
 }
 

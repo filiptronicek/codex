@@ -274,6 +274,7 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
         // one exists, but do not reintroduce the old hidden-local fallback.
         McpRuntimeContext::new(environment_manager, config.cwd.to_path_buf()),
         config.codex_home.to_path_buf(),
+        mcp_manager.codex_apps_tools_cache(),
         codex_apps_tools_cache_key(auth.as_ref()),
         host_owned_codex_apps_enabled,
         mcp_config.prefix_mcp_tool_names,
