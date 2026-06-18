@@ -3,7 +3,6 @@ use crate::codex_apps_cache::CODEX_APPS_TOOLS_CACHE_SCHEMA_VERSION;
 use crate::codex_apps_cache::CodexAppsToolsCache;
 use crate::codex_apps_cache::CodexAppsToolsCacheContext;
 use crate::codex_apps_cache::load_startup_cached_codex_apps_server_info;
-use crate::codex_apps_cache::load_startup_cached_codex_apps_tools_snapshot;
 use crate::codex_apps_cache::read_cached_codex_apps_tools;
 use crate::codex_apps_cache::write_cached_codex_apps_tools;
 use crate::codex_apps_cache::write_cached_codex_apps_tools_if_needed;
@@ -719,11 +718,9 @@ fn startup_cached_codex_apps_tools_loads_from_disk_cache() {
         Some("user-one"),
     );
 
-    let startup_tools = load_startup_cached_codex_apps_tools_snapshot(
-        CODEX_APPS_MCP_SERVER_NAME,
-        Some(&cache_context),
-    )
-    .expect("expected startup snapshot to load from cache");
+    let startup_tools = cache_context
+        .current_tools()
+        .expect("expected startup snapshot to load from cache");
     let cached_server_info = load_startup_cached_codex_apps_server_info(
         CODEX_APPS_MCP_SERVER_NAME,
         Some(&cache_context),
@@ -759,11 +756,9 @@ fn startup_cached_codex_apps_tools_loads_without_server_info_cache() {
         Some("user-one"),
     );
 
-    let startup_tools = load_startup_cached_codex_apps_tools_snapshot(
-        CODEX_APPS_MCP_SERVER_NAME,
-        Some(&cache_context),
-    )
-    .expect("legacy startup snapshot should remain available");
+    let startup_tools = cache_context
+        .current_tools()
+        .expect("legacy startup snapshot should remain available");
     let cached_server_info = load_startup_cached_codex_apps_server_info(
         CODEX_APPS_MCP_SERVER_NAME,
         Some(&cache_context),
@@ -816,13 +811,7 @@ fn codex_apps_server_info_cache_survives_legacy_tools_cache_write() {
         ),
         Some(server_info)
     );
-    assert!(
-        load_startup_cached_codex_apps_tools_snapshot(
-            CODEX_APPS_MCP_SERVER_NAME,
-            Some(&startup_cache_context),
-        )
-        .is_none()
-    );
+    assert!(startup_cache_context.current_tools().is_none());
 }
 
 #[test]

@@ -44,11 +44,10 @@ pub struct McpManager {
 
 impl McpManager {
     pub fn new(plugins_manager: Arc<PluginsManager>) -> Self {
-        Self {
+        Self::new_with_extensions(
             plugins_manager,
-            extensions: codex_extension_api::empty_extension_registry(),
-            codex_apps_tools_cache: CodexAppsToolsCache::default(),
-        }
+            codex_extension_api::empty_extension_registry(),
+        )
     }
 
     /// Creates a manager that resolves host-installed MCP contributions.

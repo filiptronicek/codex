@@ -178,20 +178,16 @@ impl McpConnectionManager {
             let resolved_bearer_token =
                 resolve_bearer_token_for_server(&server_name, &server).map_err(Into::into);
             let configured_config = server.configured_config();
-            let codex_apps_tools_cache_context = if server_name == CODEX_APPS_MCP_SERVER_NAME {
-                resolved_bearer_token
-                    .as_ref()
-                    .ok()
-                    .and_then(|resolved_bearer_token| {
-                        configured_config.map(|configured_config| {
-                            codex_apps_tools_cache.context(
-                                codex_home.clone(),
-                                codex_apps_tools_cache_key.clone(),
-                                configured_config,
-                                resolved_bearer_token.as_deref(),
-                            )
-                        })
-                    })
+            let codex_apps_tools_cache_context = if server_name == CODEX_APPS_MCP_SERVER_NAME
+                && let (Ok(resolved_bearer_token), Some(configured_config)) =
+                    (resolved_bearer_token.as_ref(), configured_config)
+            {
+                Some(codex_apps_tools_cache.context(
+                    codex_home.clone(),
+                    codex_apps_tools_cache_key.clone(),
+                    configured_config,
+                    resolved_bearer_token.as_deref(),
+                ))
             } else {
                 None
             };

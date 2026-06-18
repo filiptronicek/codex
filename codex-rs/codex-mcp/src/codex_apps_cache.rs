@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -199,10 +200,7 @@ struct CodexAppsToolsCacheEntry {
 
 impl CodexAppsToolsCacheEntry {
     fn new(identity: CodexAppsToolsCacheIdentity) -> Self {
-        let current_tools = match load_cached_codex_apps_tools_for_identity(&identity) {
-            CachedCodexAppsToolsLoad::Hit(tools) => Some(Arc::new(tools)),
-            CachedCodexAppsToolsLoad::Missing | CachedCodexAppsToolsLoad::Invalid => None,
-        };
+        let current_tools = load_cached_codex_apps_tools_for_identity(&identity).map(Arc::new);
         Self {
             identity,
             current_tools: ArcSwapOption::from(current_tools),
@@ -307,12 +305,6 @@ fn canonical_json(value: JsonValue) -> JsonValue {
     }
 }
 
-enum CachedCodexAppsToolsLoad {
-    Hit(Vec<ToolInfo>),
-    Missing,
-    Invalid,
-}
-
 #[cfg(test)]
 pub(crate) fn write_cached_codex_apps_tools_if_needed(
     server_name: &str,
@@ -333,18 +325,6 @@ pub(crate) fn write_cached_codex_apps_tools_if_needed(
     }
 }
 
-#[cfg(test)]
-pub(crate) fn load_startup_cached_codex_apps_tools_snapshot(
-    server_name: &str,
-    cache_context: Option<&CodexAppsToolsCacheContext>,
-) -> Option<Vec<ToolInfo>> {
-    if server_name != CODEX_APPS_MCP_SERVER_NAME {
-        return None;
-    }
-
-    cache_context?.current_tools()
-}
-
 pub(crate) fn load_startup_cached_codex_apps_server_info(
     server_name: &str,
     cache_context: Option<&CodexAppsToolsCacheContext>,
@@ -360,38 +340,16 @@ pub(crate) fn load_startup_cached_codex_apps_server_info(
 pub(crate) fn read_cached_codex_apps_tools(
     cache_context: &CodexAppsToolsCacheContext,
 ) -> Option<Vec<ToolInfo>> {
-    match load_cached_codex_apps_tools(cache_context) {
-        CachedCodexAppsToolsLoad::Hit(tools) => Some(tools),
-        CachedCodexAppsToolsLoad::Missing | CachedCodexAppsToolsLoad::Invalid => None,
-    }
-}
-
-#[cfg(test)]
-fn load_cached_codex_apps_tools(
-    cache_context: &CodexAppsToolsCacheContext,
-) -> CachedCodexAppsToolsLoad {
     load_cached_codex_apps_tools_for_identity(&cache_context.entry.identity)
 }
 
 fn load_cached_codex_apps_tools_for_identity(
     identity: &CodexAppsToolsCacheIdentity,
-) -> CachedCodexAppsToolsLoad {
+) -> Option<Vec<ToolInfo>> {
     let cache_path = identity.cache_path_in(CODEX_APPS_TOOLS_CACHE_DIR);
-    let bytes = match std::fs::read(cache_path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return CachedCodexAppsToolsLoad::Missing;
-        }
-        Err(_) => return CachedCodexAppsToolsLoad::Invalid,
-    };
-    let cache: CodexAppsToolsDiskCache = match serde_json::from_slice(&bytes) {
-        Ok(cache) => cache,
-        Err(_) => return CachedCodexAppsToolsLoad::Invalid,
-    };
-    if cache.schema_version != CODEX_APPS_TOOLS_CACHE_SCHEMA_VERSION {
-        return CachedCodexAppsToolsLoad::Invalid;
-    }
-    CachedCodexAppsToolsLoad::Hit(cache.tools)
+    let bytes = std::fs::read(cache_path).ok()?;
+    let cache: CodexAppsToolsDiskCache = serde_json::from_slice(&bytes).ok()?;
+    (cache.schema_version == CODEX_APPS_TOOLS_CACHE_SCHEMA_VERSION).then_some(cache.tools)
 }
 
 pub(crate) fn write_cached_codex_apps_tools(
@@ -399,26 +357,12 @@ pub(crate) fn write_cached_codex_apps_tools(
     tools: &[ToolInfo],
 ) -> anyhow::Result<()> {
     let cache_path = cache_context.tools_cache_path();
-    if let Some(parent) = cache_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create Codex Apps tools cache directory `{}`",
-                parent.display()
-            )
-        })?;
-    }
     let bytes = serde_json::to_vec_pretty(&CodexAppsToolsDiskCache {
         schema_version: CODEX_APPS_TOOLS_CACHE_SCHEMA_VERSION,
         tools: tools.to_vec(),
     })
     .context("failed to serialize Codex Apps tools cache")?;
-    std::fs::write(&cache_path, bytes).with_context(|| {
-        format!(
-            "failed to write Codex Apps tools cache `{}`",
-            cache_path.display()
-        )
-    })?;
-    Ok(())
+    write_codex_apps_cache_file(&cache_path, "tools", bytes)
 }
 
 fn load_cached_codex_apps_server_info(
@@ -435,22 +379,30 @@ fn write_cached_codex_apps_server_info(
     server_info: &McpServerInfo,
 ) -> anyhow::Result<()> {
     let cache_path = cache_context.server_info_cache_path();
-    if let Some(parent) = cache_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create Codex Apps server info cache directory `{}`",
-                parent.display()
-            )
-        })?;
-    }
     let bytes = serde_json::to_vec_pretty(&CodexAppsServerInfoDiskCache {
         schema_version: CODEX_APPS_SERVER_INFO_CACHE_SCHEMA_VERSION,
         server_info: server_info.clone(),
     })
     .context("failed to serialize Codex Apps server info cache")?;
-    std::fs::write(&cache_path, bytes).with_context(|| {
+    write_codex_apps_cache_file(&cache_path, "server info", bytes)
+}
+
+fn write_codex_apps_cache_file(
+    cache_path: &Path,
+    cache_name: &str,
+    bytes: Vec<u8>,
+) -> anyhow::Result<()> {
+    if let Some(parent) = cache_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create Codex Apps {cache_name} cache directory `{}`",
+                parent.display()
+            )
+        })?;
+    }
+    std::fs::write(cache_path, bytes).with_context(|| {
         format!(
-            "failed to write Codex Apps server info cache `{}`",
+            "failed to write Codex Apps {cache_name} cache `{}`",
             cache_path.display()
         )
     })?;
