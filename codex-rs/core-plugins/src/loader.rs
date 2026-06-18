@@ -819,13 +819,10 @@ fn plugin_skill_roots(
     plugin_root: &AbsolutePathBuf,
     manifest_paths: &PluginManifestPaths,
 ) -> Vec<AbsolutePathBuf> {
-    let mut paths = default_skill_roots(plugin_root);
     if let Some(path) = &manifest_paths.skills {
-        paths.push(path.clone());
+        return vec![path.clone()];
     }
-    paths.sort_unstable();
-    paths.dedup();
-    paths
+    default_skill_roots(plugin_root)
 }
 
 fn default_skill_roots(plugin_root: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {

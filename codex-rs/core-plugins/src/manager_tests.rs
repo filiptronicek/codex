@@ -1357,10 +1357,7 @@ async fn load_plugins_uses_manifest_configured_component_paths() {
 
     assert_eq!(
         outcome.plugins()[0].skill_roots,
-        vec![
-            plugin_root.join("custom-skills").abs(),
-            plugin_root.join("skills").abs()
-        ]
+        vec![plugin_root.join("custom-skills").abs()]
     );
     assert_eq!(
         outcome.plugins()[0].mcp_servers,
