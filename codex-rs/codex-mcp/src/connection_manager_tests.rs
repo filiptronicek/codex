@@ -31,7 +31,10 @@ use codex_protocol::mcp::McpServerInfo;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::GranularApprovalConfig;
 use codex_protocol::protocol::McpAuthStatus;
+use codex_rmcp_client::InProcessTransportFactory;
+use codex_rmcp_client::RmcpClient;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use pretty_assertions::assert_eq;
 use rmcp::model::CreateElicitationRequestParams;
 use rmcp::model::ElicitationAction;
@@ -41,8 +44,10 @@ use rmcp::model::Meta;
 use rmcp::model::NumberOrString;
 use rmcp::model::Tool;
 use std::collections::HashSet;
+use std::io;
 use std::sync::Arc;
 use tempfile::tempdir;
+use tokio::io::DuplexStream;
 
 fn create_test_tool(server_name: &str, tool_name: &str) -> ToolInfo {
     ToolInfo {
@@ -98,6 +103,50 @@ fn create_test_server_info(title: &str) -> McpServerInfo {
         description: None,
         icons: None,
         website_url: None,
+    }
+}
+
+struct TestInProcessTransportFactory;
+
+impl InProcessTransportFactory for TestInProcessTransportFactory {
+    fn open(&self) -> BoxFuture<'static, io::Result<DuplexStream>> {
+        async {
+            let (client_stream, _server_stream) = tokio::io::duplex(1);
+            Ok(client_stream)
+        }
+        .boxed()
+    }
+}
+
+async fn create_ready_async_managed_client(tools: Vec<ToolInfo>) -> AsyncManagedClient {
+    let tool_filter = ToolFilter::default();
+    let managed_client = ManagedClient {
+        client: Arc::new(
+            RmcpClient::new_in_process_client(Arc::new(TestInProcessTransportFactory))
+                .await
+                .expect("create in-process RMCP client"),
+        ),
+        server_info: create_test_server_info("Ready"),
+        tools,
+        tool_filter: tool_filter.clone(),
+        tool_timeout: None,
+        server_instructions: None,
+        server_supports_sandbox_state_meta_capability: false,
+        codex_apps_tools_cache_context: None,
+    };
+
+    AsyncManagedClient {
+        client: futures::future::ready::<Result<ManagedClient, StartupOutcomeError>>(Ok(
+            managed_client,
+        ))
+        .boxed()
+        .shared(),
+        cached_server_info: None,
+        codex_apps_tools_cache_context: None,
+        tool_filter,
+        startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
+        cancel_token: CancellationToken::new(),
     }
 }
 
@@ -1001,11 +1050,17 @@ fn codex_apps_tools_cache_scopes_catalog_sources() {
 }
 
 #[tokio::test]
-async fn list_all_tools_uses_cached_tool_info_snapshot_while_client_is_pending() {
-    let startup_tools = vec![create_test_tool(
+async fn list_all_tools_uses_shared_codex_apps_cache_while_client_is_pending() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
+    );
+    cache_context.store_current_tools_for_test(vec![create_test_tool(
         CODEX_APPS_MCP_SERVER_NAME,
         "calendar_create_event",
-    )];
+    )]);
     let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
         .boxed()
         .shared();
@@ -1020,9 +1075,8 @@ async fn list_all_tools_uses_cached_tool_info_snapshot_while_client_is_pending()
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
             client: pending_client,
-            cached_tool_info_snapshot: Some(startup_tools),
             cached_server_info: None,
-            codex_apps_tools_cache_context: None,
+            codex_apps_tools_cache_context: Some(cache_context),
             tool_filter: ToolFilter::default(),
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
@@ -1037,103 +1091,9 @@ async fn list_all_tools_uses_cached_tool_info_snapshot_while_client_is_pending()
             tool.canonical_tool_name()
                 == ToolName::namespaced("mcp__codex_apps", "calendar_create_event")
         })
-        .expect("tool from startup cache");
+        .expect("tool from shared cache");
     assert_eq!(tool.server_name, CODEX_APPS_MCP_SERVER_NAME);
     assert_eq!(tool.callable_name, "calendar_create_event");
-}
-
-#[tokio::test]
-async fn list_all_tools_uses_shared_codex_apps_cache_while_client_is_pending() {
-    let codex_home = tempdir().expect("tempdir");
-    let cache_context = create_codex_apps_tools_cache_context(
-        codex_home.path().to_path_buf(),
-        Some("account-one"),
-        Some("user-one"),
-    );
-    cache_context.store_current_tools_for_test(vec![create_test_tool(
-        CODEX_APPS_MCP_SERVER_NAME,
-        "fresh_tool",
-    )]);
-    let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
-        .boxed()
-        .shared();
-    let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
-    let permission_profile = Constrained::allow_any(PermissionProfile::default());
-    let mut manager = McpConnectionManager::new_uninitialized(
-        &approval_policy,
-        &permission_profile,
-        /*prefix_mcp_tool_names*/ true,
-    );
-    manager.clients.insert(
-        CODEX_APPS_MCP_SERVER_NAME.to_string(),
-        AsyncManagedClient {
-            client: pending_client,
-            cached_tool_info_snapshot: Some(vec![create_test_tool(
-                CODEX_APPS_MCP_SERVER_NAME,
-                "stale_tool",
-            )]),
-            cached_server_info: None,
-            codex_apps_tools_cache_context: Some(cache_context),
-            tool_filter: ToolFilter::default(),
-            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
-            cancel_token: CancellationToken::new(),
-        },
-    );
-
-    let tools = manager.list_all_tools().await;
-
-    assert!(tools.iter().any(|tool| tool.callable_name == "fresh_tool"));
-    assert!(!tools.iter().any(|tool| tool.callable_name == "stale_tool"));
-}
-
-#[tokio::test]
-async fn list_all_tools_uses_shared_codex_apps_cache_when_client_startup_fails() {
-    let codex_home = tempdir().expect("tempdir");
-    let cache_context = create_codex_apps_tools_cache_context(
-        codex_home.path().to_path_buf(),
-        Some("account-one"),
-        Some("user-one"),
-    );
-    cache_context.store_current_tools_for_test(vec![create_test_tool(
-        CODEX_APPS_MCP_SERVER_NAME,
-        "fresh_tool",
-    )]);
-    let failed_client = futures::future::ready::<Result<ManagedClient, StartupOutcomeError>>(Err(
-        StartupOutcomeError::Failed {
-            error: "startup failed".to_string(),
-        },
-    ))
-    .boxed()
-    .shared();
-    let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
-    let permission_profile = Constrained::allow_any(PermissionProfile::default());
-    let mut manager = McpConnectionManager::new_uninitialized(
-        &approval_policy,
-        &permission_profile,
-        /*prefix_mcp_tool_names*/ true,
-    );
-    manager.clients.insert(
-        CODEX_APPS_MCP_SERVER_NAME.to_string(),
-        AsyncManagedClient {
-            client: failed_client,
-            cached_tool_info_snapshot: Some(vec![create_test_tool(
-                CODEX_APPS_MCP_SERVER_NAME,
-                "stale_tool",
-            )]),
-            cached_server_info: None,
-            codex_apps_tools_cache_context: Some(cache_context),
-            tool_filter: ToolFilter::default(),
-            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
-            cancel_token: CancellationToken::new(),
-        },
-    );
-
-    let tools = manager.list_all_tools().await;
-
-    assert!(tools.iter().any(|tool| tool.callable_name == "fresh_tool"));
-    assert!(!tools.iter().any(|tool| tool.callable_name == "stale_tool"));
 }
 
 #[tokio::test]
@@ -1153,7 +1113,6 @@ async fn list_available_server_infos_uses_cache_while_client_is_pending() {
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
             client: pending_client,
-            cached_tool_info_snapshot: Some(Vec::new()),
             cached_server_info: Some(server_info.clone()),
             codex_apps_tools_cache_context: None,
             tool_filter: ToolFilter::default(),
@@ -1177,10 +1136,8 @@ async fn list_available_server_infos_uses_cache_while_client_is_pending() {
 
 #[tokio::test]
 async fn list_all_tools_accepts_canonical_namespaced_tool_names() {
-    let startup_tools = vec![create_test_tool("rmcp", "echo")];
-    let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
-        .boxed()
-        .shared();
+    let managed_client =
+        create_ready_async_managed_client(vec![create_test_tool("rmcp", "echo")]).await;
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
     let mut manager = McpConnectionManager::new_uninitialized(
@@ -1188,19 +1145,7 @@ async fn list_all_tools_accepts_canonical_namespaced_tool_names() {
         &permission_profile,
         /*prefix_mcp_tool_names*/ false,
     );
-    manager.clients.insert(
-        "rmcp".to_string(),
-        AsyncManagedClient {
-            client: pending_client,
-            cached_tool_info_snapshot: Some(startup_tools),
-            cached_server_info: None,
-            codex_apps_tools_cache_context: None,
-            tool_filter: ToolFilter::default(),
-            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
-            cancel_token: CancellationToken::new(),
-        },
-    );
+    manager.clients.insert("rmcp".to_string(), managed_client);
 
     let tools = manager.list_all_tools().await;
     let tool = tools
@@ -1222,10 +1167,8 @@ async fn list_all_tools_accepts_canonical_namespaced_tool_names() {
 
 #[tokio::test]
 async fn list_all_tools_applies_legacy_mcp_prefix_by_default() {
-    let startup_tools = vec![create_test_tool("rmcp", "echo")];
-    let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
-        .boxed()
-        .shared();
+    let managed_client =
+        create_ready_async_managed_client(vec![create_test_tool("rmcp", "echo")]).await;
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
     let mut manager = McpConnectionManager::new_uninitialized(
@@ -1233,19 +1176,7 @@ async fn list_all_tools_applies_legacy_mcp_prefix_by_default() {
         &permission_profile,
         /*prefix_mcp_tool_names*/ true,
     );
-    manager.clients.insert(
-        "rmcp".to_string(),
-        AsyncManagedClient {
-            client: pending_client,
-            cached_tool_info_snapshot: Some(startup_tools),
-            cached_server_info: None,
-            codex_apps_tools_cache_context: None,
-            tool_filter: ToolFilter::default(),
-            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
-            cancel_token: CancellationToken::new(),
-        },
-    );
+    manager.clients.insert("rmcp".to_string(), managed_client);
 
     let tools = manager.list_all_tools().await;
     let tool = tools
@@ -1266,7 +1197,7 @@ async fn list_all_tools_applies_legacy_mcp_prefix_by_default() {
 }
 
 #[tokio::test]
-async fn list_all_tools_blocks_while_client_is_pending_without_cached_tool_info_snapshot() {
+async fn list_all_tools_blocks_while_client_is_pending_without_cached_tools() {
     let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
         .boxed()
         .shared();
@@ -1281,7 +1212,6 @@ async fn list_all_tools_blocks_while_client_is_pending_without_cached_tool_info_
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
             client: pending_client,
-            cached_tool_info_snapshot: None,
             cached_server_info: None,
             codex_apps_tools_cache_context: None,
             tool_filter: ToolFilter::default(),
@@ -1319,7 +1249,6 @@ async fn shutdown_cancels_pending_tool_listing() {
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
             client: pending_client,
-            cached_tool_info_snapshot: None,
             cached_server_info: None,
             codex_apps_tools_cache_context: None,
             tool_filter: ToolFilter::default(),
@@ -1341,7 +1270,14 @@ async fn shutdown_cancels_pending_tool_listing() {
 }
 
 #[tokio::test]
-async fn list_all_tools_does_not_block_when_cached_tool_info_snapshot_is_empty() {
+async fn list_all_tools_does_not_block_when_shared_codex_apps_cache_is_empty() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
+    );
+    cache_context.store_current_tools_for_test(Vec::new());
     let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
         .boxed()
         .shared();
@@ -1356,9 +1292,8 @@ async fn list_all_tools_does_not_block_when_cached_tool_info_snapshot_is_empty()
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
             client: pending_client,
-            cached_tool_info_snapshot: Some(Vec::new()),
             cached_server_info: None,
-            codex_apps_tools_cache_context: None,
+            codex_apps_tools_cache_context: Some(cache_context),
             tool_filter: ToolFilter::default(),
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
@@ -1368,16 +1303,22 @@ async fn list_all_tools_does_not_block_when_cached_tool_info_snapshot_is_empty()
 
     let timeout_result =
         tokio::time::timeout(Duration::from_millis(10), manager.list_all_tools()).await;
-    let tools = timeout_result.expect("cache-hit startup snapshot should not block");
+    let tools = timeout_result.expect("shared empty cache should not block");
     assert!(tools.is_empty());
 }
 
 #[tokio::test]
-async fn list_all_tools_uses_cached_tool_info_snapshot_when_client_startup_fails() {
-    let startup_tools = vec![create_test_tool(
+async fn list_all_tools_uses_shared_codex_apps_cache_when_client_startup_fails() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
+    );
+    cache_context.store_current_tools_for_test(vec![create_test_tool(
         CODEX_APPS_MCP_SERVER_NAME,
         "calendar_create_event",
-    )];
+    )]);
     let server_info = create_test_server_info("Codex Apps");
     let failed_client = futures::future::ready::<Result<ManagedClient, StartupOutcomeError>>(Err(
         StartupOutcomeError::Failed {
@@ -1398,9 +1339,8 @@ async fn list_all_tools_uses_cached_tool_info_snapshot_when_client_startup_fails
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
             client: failed_client,
-            cached_tool_info_snapshot: Some(startup_tools),
             cached_server_info: Some(server_info.clone()),
-            codex_apps_tools_cache_context: None,
+            codex_apps_tools_cache_context: Some(cache_context),
             tool_filter: ToolFilter::default(),
             startup_complete,
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
@@ -1415,7 +1355,7 @@ async fn list_all_tools_uses_cached_tool_info_snapshot_when_client_startup_fails
             tool.canonical_tool_name()
                 == ToolName::namespaced("mcp__codex_apps", "calendar_create_event")
         })
-        .expect("tool from startup cache");
+        .expect("tool from shared cache");
     assert_eq!(tool.server_name, CODEX_APPS_MCP_SERVER_NAME);
     assert_eq!(tool.callable_name, "calendar_create_event");
     assert_eq!(
@@ -1428,12 +1368,10 @@ async fn list_all_tools_uses_cached_tool_info_snapshot_when_client_startup_fails
 }
 
 #[tokio::test]
-async fn list_all_tools_adds_server_metadata_to_cached_tools() {
+async fn list_all_tools_adds_server_metadata_to_tools() {
     let server_name = "docs";
-    let startup_tools = vec![create_test_tool(server_name, "search")];
-    let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
-        .boxed()
-        .shared();
+    let managed_client =
+        create_ready_async_managed_client(vec![create_test_tool(server_name, "search")]).await;
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
     let mut manager = McpConnectionManager::new_uninitialized(
@@ -1454,19 +1392,9 @@ async fn list_all_tools_adds_server_metadata_to_cached_tools() {
             tool_approval_modes: HashMap::new(),
         },
     );
-    manager.clients.insert(
-        server_name.to_string(),
-        AsyncManagedClient {
-            client: pending_client,
-            cached_tool_info_snapshot: Some(startup_tools),
-            cached_server_info: None,
-            codex_apps_tools_cache_context: None,
-            tool_filter: ToolFilter::default(),
-            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
-            cancel_token: CancellationToken::new(),
-        },
-    );
+    manager
+        .clients
+        .insert(server_name.to_string(), managed_client);
 
     let tools = manager.list_all_tools().await;
     assert_eq!(tools.len(), 1);

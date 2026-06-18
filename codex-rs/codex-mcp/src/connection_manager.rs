@@ -175,6 +175,9 @@ impl McpConnectionManager {
                 },
             )
             .await;
+            // Resolve once, then use the same credential for the cache key and
+            // the MCP client. For built-in Codex Apps, `CODEX_CONNECTORS_TOKEN`
+            // overrides CodexAuth and decides which catalog MCP returns.
             let resolved_bearer_token =
                 resolve_bearer_token_for_server(&server_name, &server).map_err(Into::into);
             let configured_config = server.configured_config();
@@ -199,6 +202,8 @@ impl McpConnectionManager {
                     } => bearer_token_env_var.is_some(),
                     McpServerTransportConfig::Stdio { .. } => false,
                 });
+            // If Codex Apps has an env bearer token, that is its auth path. Do
+            // not also attach the ambient CodexAuth provider.
             let runtime_auth_provider =
                 if server_name == CODEX_APPS_MCP_SERVER_NAME && !uses_env_bearer_token {
                     codex_apps_auth_provider.clone()
@@ -465,13 +470,13 @@ impl McpConnectionManager {
     pub async fn list_all_tools(&self) -> Vec<ToolInfo> {
         let mut tools = Vec::new();
         for (server_name, managed_client) in &self.clients {
-            let has_cached_tool_info_snapshot = managed_client.has_cached_tool_info_snapshot();
+            let has_cached_tools = managed_client.has_cached_tools();
             let startup_complete = managed_client
                 .startup_complete
                 .load(std::sync::atomic::Ordering::Acquire);
             trace!(
                 server_name = %server_name,
-                has_cached_tool_info_snapshot,
+                has_cached_tools,
                 startup_complete,
                 "waiting for MCP server tools while building tool list"
             );
@@ -480,7 +485,7 @@ impl McpConnectionManager {
                 .instrument(trace_span!(
                     "list_tools_for_server",
                     server_name = %server_name,
-                    has_cached_tool_info_snapshot,
+                    has_cached_tools,
                     startup_complete
                 ))
                 .await

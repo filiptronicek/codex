@@ -32,6 +32,11 @@ use crate::tools::ToolInfo;
 
 const MCP_TOOLS_CACHE_PUBLISH_DURATION_METRIC: &str = "codex.mcp.tools.cache_publish.duration_ms";
 
+/// The CodexAuth bits that identify a Codex Apps catalog.
+///
+/// This is enough for the normal CodexAuth-backed path. If
+/// `CODEX_CONNECTORS_TOKEN` is set, Codex Apps uses that bearer token instead,
+/// so the full cache identity uses the token's fingerprint instead.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CodexAppsToolsCacheKey {
     pub(crate) account_id: Option<String>,
@@ -39,6 +44,10 @@ pub struct CodexAppsToolsCacheKey {
     pub(crate) is_workspace_account: bool,
 }
 
+/// Builds the CodexAuth-backed part of the Codex Apps cache key.
+///
+/// We cannot decide the env-token-backed case here because the per-server env
+/// var has not been resolved yet.
 pub fn codex_apps_tools_cache_key(auth: Option<&CodexAuth>) -> CodexAppsToolsCacheKey {
     CodexAppsToolsCacheKey {
         account_id: auth.and_then(CodexAuth::get_account_id),
@@ -49,13 +58,17 @@ pub fn codex_apps_tools_cache_key(auth: Option<&CodexAuth>) -> CodexAppsToolsCac
 
 /// Process-scoped registry for shared Codex Apps raw tool snapshots.
 ///
-/// Entries load disk only while creating a full-identity entry. Later reads
-/// use memory, so active entries do not adopt another process's disk writes.
+/// Two clients share an entry only when they would read the same Codex Apps
+/// catalog. New entries may seed from disk; live entries read from memory only.
 #[derive(Clone, Default)]
 pub struct CodexAppsToolsCache {
     entries: Arc<Mutex<HashMap<CodexAppsToolsCacheIdentity, Arc<CodexAppsToolsCacheEntry>>>>,
 }
 
+/// Handle to one shared Codex Apps tools cache entry.
+///
+/// The connection manager creates this from the catalog identity, then tool
+/// reads and refreshes for that managed client use the same entry.
 #[derive(Clone)]
 pub(crate) struct CodexAppsToolsCacheContext {
     entry: Arc<CodexAppsToolsCacheEntry>,
@@ -143,6 +156,8 @@ impl CodexAppsToolsCache {
         config: &McpServerConfig,
         resolved_bearer_token: Option<&str>,
     ) -> CodexAppsToolsCacheContext {
+        // Build the cache entry from the credential the request will actually
+        // use. Normal Codex Apps uses CodexAuth; an env bearer token overrides it.
         let identity =
             CodexAppsToolsCacheIdentity::new(codex_home, auth_key, config, resolved_bearer_token);
         let mut entries = lock_unpoisoned(&self.entries);
@@ -215,6 +230,11 @@ struct CodexAppsToolsPublicationState {
     last_accepted_generation: u64,
 }
 
+/// Everything that decides whether two Codex Apps clients can share tools.
+///
+/// The principal says whose catalog we are reading. The source fingerprint
+/// says which Codex Apps endpoint/config we are reading from. `codex_home`
+/// keeps the persisted cache under the right home directory.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 struct CodexAppsToolsCacheIdentity {
     codex_home: PathBuf,
@@ -231,9 +251,11 @@ impl CodexAppsToolsCacheIdentity {
     ) -> Self {
         let catalog_principal = match resolved_bearer_token {
             Some(token) => {
-                // Env-token-backed Codex Apps uses this bearer token, not ambient
-                // CodexAuth, to select the remote catalog. Keep only an opaque
-                // fingerprint in cache identity and persistence paths.
+                // For built-in Codex Apps this is the resolved
+                // `CODEX_CONNECTORS_TOKEN` override. That token, not CodexAuth,
+                // decides which catalog MCP returns, so it has to split the cache.
+                // Store only a fingerprint; never put the raw token in cache state
+                // or disk paths.
                 CodexAppsCatalogPrincipal::EnvBearerTokenFingerprint(
                     CodexAppsBearerTokenFingerprint(sha1_hex(token)),
                 )
@@ -256,18 +278,30 @@ impl CodexAppsToolsCacheIdentity {
     }
 }
 
+/// The credential-derived piece of the Codex Apps cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 enum CodexAppsCatalogPrincipal {
+    /// Normal Codex Apps path: the active CodexAuth account/user/workspace.
     CodexAuth(CodexAppsToolsCacheKey),
+    /// Env-token-backed path: the resolved bearer token selects the catalog.
     EnvBearerTokenFingerprint(CodexAppsBearerTokenFingerprint),
 }
 
+/// Fingerprint of a resolved env-backed Codex Apps bearer token.
+///
+/// We use this only to keep two different env tokens from sharing a tools
+/// cache entry. The raw token never goes into the cache key or path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 struct CodexAppsBearerTokenFingerprint(String);
 
+/// Fingerprint of the Codex Apps MCP config that can change the catalog source.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 struct CodexAppsCatalogSourceFingerprint(String);
 
+/// Config fields that can change which Codex Apps catalog we query.
+///
+/// The transport includes the URL and configured headers, including the product
+/// SKU header added by `codex_apps_mcp_server_config`.
 #[derive(Serialize)]
 struct CodexAppsCatalogSource<'a> {
     environment_id: &'a str,
@@ -277,6 +311,8 @@ struct CodexAppsCatalogSource<'a> {
 fn codex_apps_catalog_source_fingerprint(
     config: &McpServerConfig,
 ) -> CodexAppsCatalogSourceFingerprint {
+    // Header maps can serialize in different orders. Normalize first so the
+    // same config still lands in the same cache entry.
     let source = CodexAppsCatalogSource {
         environment_id: &config.environment_id,
         transport: &config.transport,

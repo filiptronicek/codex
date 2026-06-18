@@ -2,7 +2,7 @@
 //!
 //! This module owns startup of individual RMCP clients: building the transport,
 //! initializing the server, listing raw tools, applying per-server tool filters,
-//! and exposing cached startup snapshots while a client is still connecting.
+//! and exposing cached Codex Apps tools while a client is still connecting.
 //! Higher-level aggregation and resource/tool APIs live in
 //! [`crate::connection_manager`].
 
@@ -127,7 +127,6 @@ impl ManagedClient {
 #[derive(Clone)]
 pub(crate) struct AsyncManagedClient {
     pub(crate) client: Shared<BoxFuture<'static, Result<ManagedClient, StartupOutcomeError>>>,
-    pub(crate) cached_tool_info_snapshot: Option<Vec<ToolInfo>>,
     pub(crate) cached_server_info: Option<McpServerInfo>,
     pub(crate) codex_apps_tools_cache_context: Option<CodexAppsToolsCacheContext>,
     pub(crate) tool_filter: ToolFilter,
@@ -160,7 +159,6 @@ impl AsyncManagedClient {
             .configured_config()
             .map(ToolFilter::from_config)
             .unwrap_or_default();
-        let cached_tool_info_snapshot = None;
         let cached_server_info = load_startup_cached_codex_apps_server_info(
             &server_name,
             codex_apps_tools_cache_context.as_ref(),
@@ -224,7 +222,6 @@ impl AsyncManagedClient {
         if codex_apps_tools_cache_context
             .as_ref()
             .is_some_and(CodexAppsToolsCacheContext::has_current_tools)
-            || cached_tool_info_snapshot.is_some()
         {
             let startup_task = client.clone();
             tokio::spawn(async move {
@@ -234,7 +231,6 @@ impl AsyncManagedClient {
 
         Self {
             client,
-            cached_tool_info_snapshot,
             cached_server_info,
             codex_apps_tools_cache_context,
             tool_filter,
@@ -259,29 +255,17 @@ impl AsyncManagedClient {
         }
     }
 
-    pub(crate) fn has_cached_tool_info_snapshot(&self) -> bool {
+    pub(crate) fn has_cached_tools(&self) -> bool {
         self.codex_apps_tools_cache_context
             .as_ref()
             .is_some_and(CodexAppsToolsCacheContext::has_current_tools)
-            || self.cached_tool_info_snapshot.is_some()
     }
 
     fn cached_tools(&self) -> Option<Vec<ToolInfo>> {
-        if let Some(tools) = self
-            .codex_apps_tools_cache_context
+        self.codex_apps_tools_cache_context
             .as_ref()
             .and_then(CodexAppsToolsCacheContext::current_tools)
-        {
-            return Some(filter_tools(tools, &self.tool_filter));
-        }
-        self.cached_tool_info_snapshot.clone()
-    }
-
-    fn cached_tool_info_snapshot_while_initializing(&self) -> Option<Vec<ToolInfo>> {
-        if !self.startup_complete.load(Ordering::Acquire) {
-            return self.cached_tools();
-        }
-        None
+            .map(|tools| filter_tools(tools, &self.tool_filter))
     }
 
     pub(crate) async fn listed_tools(&self) -> Option<Vec<ToolInfo>> {
@@ -337,7 +321,8 @@ impl AsyncManagedClient {
         };
 
         // Keep cache payloads raw; plugin provenance is resolved per-session at read time.
-        let tools = if let Some(startup_tools) = self.cached_tool_info_snapshot_while_initializing()
+        let tools = if !self.startup_complete.load(Ordering::Acquire)
+            && let Some(startup_tools) = self.cached_tools()
         {
             Some(startup_tools)
         } else {
