@@ -2259,22 +2259,37 @@ async fn plugins_popup_remote_local_dedupe_prefers_installed_remote_after_mapped
             PluginInstallPolicy::Available,
         )
     };
-    let popup = render_loaded_plugins_popup(
+    let cwd = chat.config.cwd.clone();
+    render_loaded_plugins_popup(
         &mut chat,
-        plugins_test_response(vec![
-            plugins_test_curated_marketplace(vec![local_summary]),
-            plugins_test_remote_marketplace(
-                "openai-curated-remote",
-                "Remote curated",
-                vec![plugins_test_remote_summary(
-                    remote_plugin_id,
-                    "docs",
-                    Some("Docs"),
-                    Some("Remote installed docs plugin."),
-                    /*installed*/ true,
-                )],
-            ),
-        ]),
+        plugins_test_response(vec![plugins_test_curated_marketplace(vec![local_summary])]),
+    );
+    chat.on_plugin_remote_sections_loaded(
+        cwd.to_path_buf(),
+        vec![plugins_test_remote_marketplace(
+            "openai-curated-remote",
+            "Remote curated",
+            vec![plugins_test_remote_summary(
+                remote_plugin_id,
+                "docs",
+                Some("Docs"),
+                Some("Remote installed docs plugin."),
+                /*installed*/ true,
+            )],
+        )],
+        Vec::new(),
+    );
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    let PluginsCacheState::Ready(response) = &chat.plugins_cache else {
+        panic!("expected cached plugins after remote section refresh");
+    };
+    assert_eq!(
+        response
+            .marketplaces
+            .iter()
+            .map(|marketplace| marketplace.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["openai-curated-remote"]
     );
     let all_plugins_row = popup
         .lines()
