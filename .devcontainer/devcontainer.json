@@ -1,14 +1,14 @@
 {
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
   "name": "Codex",
   "build": {
     "dockerfile": "Dockerfile",
     "context": "..",
-    "platform": "linux/arm64"
+    "args": {
+      "NODE_MAJOR": "22",
+      "RUST_TOOLCHAIN": "1.95.0"
+    }
   },
-
-  /* Force VS Code to run the container as arm64 in
-     case your host is x86 (or vice-versa). */
-  "runArgs": ["--platform=linux/arm64"],
 
   "features": {
     "ghcr.io/facebook/devcontainers/features/dotslash:latest": {}
@@ -16,15 +16,13 @@
 
   "containerEnv": {
     "RUST_BACKTRACE": "1",
-    "CARGO_TARGET_DIR": "${containerWorkspaceFolder}/codex-rs/target-arm64"
+    "CARGO_TARGET_DIR": "${containerWorkspaceFolder}/codex-rs/target-devcontainer",
+    "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0"
   },
 
-  "remoteUser": "ubuntu",
+  "remoteUser": "vscode",
   "customizations": {
     "vscode": {
-      "settings": {
-        "terminal.integrated.defaultProfile.linux": "bash"
-      },
       "extensions": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml"]
     }
   }

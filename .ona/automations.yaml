@@ -1,0 +1,18 @@
+tasks:
+  warm-caches:
+    name: Warm dependency and build caches
+    description: Download package dependencies and compile the Codex CLI so prebuild snapshots include warm caches.
+    triggeredBy:
+      - prebuild
+    prebuildRequiresSuccess: true
+    command: |
+      set -eux
+
+      export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/codex-rs/target-devcontainer}"
+
+      corepack enable
+      pnpm install --frozen-lockfile
+
+      cd codex-rs
+      cargo fetch --locked
+      cargo build --locked -p codex-cli --bin codex
