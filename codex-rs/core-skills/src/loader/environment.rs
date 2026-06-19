@@ -75,9 +75,9 @@ pub async fn load_environment_skills_from_root(
         Ok(_) => return outcome,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return outcome,
         Err(err) => {
-            outcome
-                .warnings
-                .push(format!("Failed to load environment skills at {root}: {err}"));
+            outcome.warnings.push(format!(
+                "Failed to load environment skills at {root}: {err}"
+            ));
             return outcome;
         }
     }
@@ -90,9 +90,9 @@ pub async fn load_environment_skills_from_root(
         let entries = match file_system.read_directory(&dir, /*sandbox*/ None).await {
             Ok(entries) => entries,
             Err(err) => {
-                outcome
-                    .warnings
-                    .push(format!("Failed to read environment skills dir {dir}: {err}"));
+                outcome.warnings.push(format!(
+                    "Failed to read environment skills dir {dir}: {err}"
+                ));
                 continue;
             }
         };
@@ -114,9 +114,9 @@ pub async fn load_environment_skills_from_root(
             let metadata = match file_system.get_metadata(&path, /*sandbox*/ None).await {
                 Ok(metadata) => metadata,
                 Err(err) => {
-                    outcome
-                        .warnings
-                        .push(format!("Failed to stat environment skill path {path}: {err}"));
+                    outcome.warnings.push(format!(
+                        "Failed to stat environment skill path {path}: {err}"
+                    ));
                     continue;
                 }
             };
@@ -139,9 +139,9 @@ pub async fn load_environment_skills_from_root(
                             err.kind(),
                             io::ErrorKind::NotADirectory | io::ErrorKind::NotFound
                         ) => {}
-                    Err(err) => outcome
-                        .warnings
-                        .push(format!("Failed to read environment symlink dir {path}: {err}")),
+                    Err(err) => outcome.warnings.push(format!(
+                        "Failed to read environment symlink dir {path}: {err}"
+                    )),
                 }
                 continue;
             }
@@ -226,8 +226,7 @@ async fn parse_environment_skill_file(
         .await
         .map(|namespace| format!("{namespace}:{base_name}"))
         .unwrap_or(base_name);
-    validate_len(&name, MAX_QUALIFIED_NAME_LEN, "qualified name")
-        .map_err(|err| err.to_string())?;
+    validate_len(&name, MAX_QUALIFIED_NAME_LEN, "qualified name").map_err(|err| err.to_string())?;
     let (dependencies, policy) = load_skill_metadata(file_system, path).await;
     let path_to_skills_md = canonicalize_for_skill_identity(file_system, path).await;
     let Some(package_root) = path_to_skills_md.parent() else {
@@ -252,9 +251,9 @@ async fn load_skill_metadata(
     let Some(skill_dir) = skill_path.parent() else {
         return (None, None);
     };
-    let Ok(metadata_path) = skill_dir.join(&format!(
-        "{SKILLS_METADATA_DIR}/{SKILLS_METADATA_FILENAME}"
-    )) else {
+    let Ok(metadata_path) =
+        skill_dir.join(&format!("{SKILLS_METADATA_DIR}/{SKILLS_METADATA_FILENAME}"))
+    else {
         return (None, None);
     };
     match file_system

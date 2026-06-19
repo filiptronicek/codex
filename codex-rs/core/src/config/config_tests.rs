@@ -89,6 +89,7 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::NetworkAccess;
 use codex_protocol::protocol::RealtimeVoice;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use tempfile::tempdir;
 
@@ -5469,6 +5470,7 @@ async fn load_global_mcp_servers_returns_empty_if_missing() -> anyhow::Result<()
 #[tokio::test]
 async fn replace_mcp_servers_round_trips_entries() -> anyhow::Result<()> {
     let codex_home = TempDir::new()?;
+    let expected_cwd = PathUri::from_path(codex_home.path())?;
 
     let mut servers = BTreeMap::new();
     servers.insert(
@@ -5479,7 +5481,7 @@ async fn replace_mcp_servers_round_trips_entries() -> anyhow::Result<()> {
                 args: vec!["hello".to_string()],
                 env: None,
                 env_vars: Vec::new(),
-                cwd: Some(codex_home.path().to_path_buf()),
+                cwd: Some(expected_cwd.clone().into()),
             },
             environment_id: "remote".to_string(),
             enabled: true,
@@ -5518,7 +5520,7 @@ async fn replace_mcp_servers_round_trips_entries() -> anyhow::Result<()> {
             assert_eq!(args, &vec!["hello".to_string()]);
             assert!(env.is_none());
             assert!(env_vars.is_empty());
-            assert_eq!(cwd, &Some(codex_home.path().to_path_buf()));
+            assert_eq!(cwd, &Some(expected_cwd.into()));
         }
         other => panic!("unexpected transport {other:?}"),
     }
@@ -6027,7 +6029,7 @@ async fn replace_mcp_servers_serializes_cwd() -> anyhow::Result<()> {
                 args: Vec::new(),
                 env: None,
                 env_vars: Vec::new(),
-                cwd: Some(cwd_path.clone()),
+                cwd: Some(cwd_path.clone().into()),
             },
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
@@ -6062,7 +6064,12 @@ async fn replace_mcp_servers_serializes_cwd() -> anyhow::Result<()> {
     let docs = loaded.get("docs").expect("docs entry");
     match &docs.transport {
         McpServerTransportConfig::Stdio { cwd, .. } => {
-            assert_eq!(cwd.as_deref(), Some(Path::new("/tmp/codex-mcp")));
+            assert_eq!(
+                cwd,
+                &Some(codex_config::McpServerCwd::from(PathBuf::from(
+                    "/tmp/codex-mcp"
+                )))
+            );
         }
         other => panic!("unexpected transport {other:?}"),
     }

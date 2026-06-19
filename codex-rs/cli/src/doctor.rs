@@ -1520,33 +1520,52 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
                 if disabled_server {
                     continue;
                 }
-                if let Some(cwd) = cwd
-                    && !cwd.exists()
-                {
-                    missing_env.push(format!("{name}: cwd does not exist ({})", cwd.display()));
-                }
                 if command.trim().is_empty() {
                     missing_env.push(format!("{name}: stdio command is empty"));
-                } else if let Err(err) =
-                    stdio_command_resolves(command, cwd.as_deref(), env.as_ref())
-                {
-                    missing_env.push(format!(
-                        "{name}: stdio command {command:?} is not resolvable ({err})"
-                    ));
+                } else if server.is_local_environment() {
+                    match cwd
+                        .as_ref()
+                        .map(codex_config::McpServerCwd::to_local_path)
+                        .transpose()
+                    {
+                        Ok(cwd) => {
+                            if let Some(cwd) = cwd.as_ref()
+                                && !cwd.exists()
+                            {
+                                missing_env.push(format!(
+                                    "{name}: cwd does not exist ({})",
+                                    cwd.display()
+                                ));
+                            }
+                            if let Err(err) =
+                                stdio_command_resolves(command, cwd.as_deref(), env.as_ref())
+                            {
+                                missing_env.push(format!(
+                                    "{name}: stdio command {command:?} is not resolvable ({err})"
+                                ));
+                            }
+                        }
+                        Err(err) => missing_env.push(format!(
+                            "{name}: cwd cannot be represented on this host ({err})"
+                        )),
+                    }
                 }
                 if let Some(env) = env {
                     for key in env.keys().filter(|key| key.trim().is_empty()) {
                         missing_env.push(format!("{name}: empty env key {key}"));
                     }
                 }
-                for env_var in env_vars {
-                    if env_var.is_remote_source() {
-                        missing_env.push(format!(
-                            "{name}: env_vars entry `{}` uses source `remote`, which requires remote MCP stdio",
-                            env_var.name()
-                        ));
-                    } else if !env_var_present(env_var.name()) {
-                        missing_env.push(format!("{name}: env var {} is not set", env_var.name()));
+                if server.is_local_environment() {
+                    for env_var in env_vars {
+                        if env_var.is_remote_source() {
+                            missing_env.push(format!(
+                                "{name}: env_vars entry `{}` uses source `remote`, which requires remote MCP stdio",
+                                env_var.name()
+                            ));
+                        } else if !env_var_present(env_var.name()) {
+                            missing_env
+                                .push(format!("{name}: env var {} is not set", env_var.name()));
+                        }
                     }
                 }
             }
@@ -3439,6 +3458,26 @@ mod tests {
                 "required: env_vars entry `REMOTE_ONLY_TOKEN` uses source `remote`, which requires remote MCP stdio",
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn mcp_check_does_not_probe_environment_stdio_on_the_host() {
+        let remote_server: McpServerConfig = toml::from_str(
+            r#"
+                command = "remote-only-command"
+                environment_id = "remote"
+                cwd = "file:///C:/plugins/demo"
+                required = true
+                env_vars = [{ name = "REMOTE_ONLY_TOKEN", source = "remote" }]
+            "#,
+        )
+        .expect("remote MCP config");
+        let servers = HashMap::from([("remote".to_string(), remote_server)]);
+
+        let check = mcp_check_from_servers(&servers).await;
+
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert_eq!(check.summary, "MCP configuration is locally consistent");
     }
 
     #[test]

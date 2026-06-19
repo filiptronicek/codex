@@ -157,11 +157,9 @@ fn catalog_entry_from_skill(
     .with_display_path(display_path)
     .with_dependencies(skill.dependencies.clone());
 
-    let entry = if skill.allows_implicit_invocation() {
+    if skill.allows_implicit_invocation() {
         entry
     } else {
         entry.hidden_from_prompt()
-    };
-
-    entry
+    }
 }

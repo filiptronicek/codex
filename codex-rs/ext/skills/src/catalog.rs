@@ -113,7 +113,9 @@ impl SkillResourceId {
             return Some(self.clone());
         }
         let package_prefix = resource.package_id.rsplit_once('/')?.0;
-        let relative_path = requested_id.strip_prefix(package_prefix)?.strip_prefix('/')?;
+        let relative_path = requested_id
+            .strip_prefix(package_prefix)?
+            .strip_prefix('/')?;
         if relative_path.is_empty()
             || relative_path
                 .split(['/', '\\'])

@@ -52,7 +52,7 @@ fn deserialize_stdio_command_server_config_with_args() {
 }
 
 #[test]
-fn deserialize_remote_stdio_server_requires_absolute_cwd() {
+fn deserialize_remote_stdio_server_requires_file_uri_cwd() {
     let missing_cwd = toml::from_str::<McpServerConfig>(
         r#"
             command = "echo"
@@ -63,7 +63,7 @@ fn deserialize_remote_stdio_server_requires_absolute_cwd() {
     assert!(
         missing_cwd
             .to_string()
-            .contains("remote stdio MCP servers require an absolute cwd"),
+            .contains("remote stdio MCP servers require a file URI cwd"),
         "unexpected error: {missing_cwd}"
     );
 
@@ -74,26 +74,40 @@ fn deserialize_remote_stdio_server_requires_absolute_cwd() {
             cwd = "relative"
         "#,
     )
-    .expect_err("remote stdio MCP should require absolute cwd");
+    .expect_err("remote stdio MCP should require a file URI cwd");
     assert!(
         relative_cwd.to_string().contains("got `relative`"),
         "unexpected error: {relative_cwd}"
     );
-}
 
-#[test]
-fn deserialize_remote_stdio_server_accepts_absolute_cwd() {
-    let cwd = std::env::temp_dir();
-    let cfg: McpServerConfig = match toml::from_str(&format!(
+    let native_cwd = std::env::temp_dir();
+    let native_cwd_error = toml::from_str::<McpServerConfig>(&format!(
         r#"
             command = "echo"
             environment_id = "remote"
-            cwd = {cwd:?}
+            cwd = {native_cwd:?}
         "#
-    )) {
-        Ok(cfg) => cfg,
-        Err(error) => panic!("remote stdio MCP should accept absolute cwd: {error}"),
-    };
+    ))
+    .expect_err("remote stdio MCP should reject orchestrator-native cwd");
+    assert!(
+        native_cwd_error
+            .to_string()
+            .contains("remote stdio MCP servers require a file URI cwd"),
+        "unexpected error: {native_cwd_error}"
+    );
+}
+
+#[test]
+fn deserialize_remote_stdio_server_accepts_file_uri_cwd() {
+    let cwd = PathUri::parse("file:///C:/plugins/demo").expect("cwd URI");
+    let cfg: McpServerConfig = toml::from_str(
+        r#"
+            command = "echo"
+            environment_id = "remote"
+            cwd = "file:///C:/plugins/demo"
+        "#,
+    )
+    .expect("remote stdio MCP should accept file URI cwd");
 
     assert_eq!(
         cfg.transport,
@@ -244,8 +258,8 @@ fn deserialize_remote_stdio_server_preserves_foreign_cwd_uri() {
     };
     assert_eq!(
         cwd,
-        Some(McpServerCwd::Uri(
-            PathUri::parse("file:///C:/plugins/demo").unwrap()
+        Some(McpServerCwd::Environment(
+            PathUri::parse("file:///C:/plugins/demo").expect("cwd URI")
         ))
     );
 }

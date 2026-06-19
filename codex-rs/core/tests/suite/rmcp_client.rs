@@ -298,7 +298,7 @@ fn stdio_transport_with_cwd(
         args: Vec::new(),
         env,
         env_vars,
-        cwd,
+        cwd: cwd.map(Into::into),
     }
 }
 

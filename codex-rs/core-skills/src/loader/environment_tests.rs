@@ -44,12 +44,8 @@ policy:
     .expect("metadata");
 
     let root_uri = PathUri::from_path(root.path()).expect("root URI");
-    let outcome = load_environment_skills_from_root(
-        LOCAL_FS.as_ref(),
-        &root_uri,
-        Some(Product::Codex),
-    )
-    .await;
+    let outcome =
+        load_environment_skills_from_root(LOCAL_FS.as_ref(), &root_uri, Some(Product::Codex)).await;
 
     assert_eq!(outcome.warnings, Vec::<String>::new());
     assert_eq!(outcome.skills.len(), 1);

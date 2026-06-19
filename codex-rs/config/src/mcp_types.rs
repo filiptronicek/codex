@@ -25,29 +25,17 @@ pub const DEFAULT_MCP_SERVER_ENVIRONMENT_ID: &str = "local";
 /// using the orchestrator host's path rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpServerCwd {
-    Native(PathBuf),
-    Uri(PathUri),
+    /// Path interpreted by the orchestrator host.
+    Local(PathBuf),
+    /// URI interpreted by the environment that owns the MCP process.
+    Environment(PathUri),
 }
 
 impl McpServerCwd {
-    pub fn is_absolute(&self) -> bool {
-        match self {
-            Self::Native(path) => path.is_absolute(),
-            Self::Uri(_) => true,
-        }
-    }
-
     pub fn to_local_path(&self) -> io::Result<PathBuf> {
         match self {
-            Self::Native(path) => Ok(path.clone()),
-            Self::Uri(uri) => uri.to_abs_path().map(Into::into),
-        }
-    }
-
-    pub fn to_path_uri(&self) -> io::Result<PathUri> {
-        match self {
-            Self::Native(path) => PathUri::from_path(path),
-            Self::Uri(uri) => Ok(uri.clone()),
+            Self::Local(path) => Ok(path.clone()),
+            Self::Environment(uri) => uri.to_abs_path().map(Into::into),
         }
     }
 }
@@ -55,21 +43,21 @@ impl McpServerCwd {
 impl fmt::Display for McpServerCwd {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Native(path) => path.display().fmt(f),
-            Self::Uri(uri) => uri.fmt(f),
+            Self::Local(path) => path.display().fmt(f),
+            Self::Environment(uri) => uri.fmt(f),
         }
     }
 }
 
 impl From<PathBuf> for McpServerCwd {
     fn from(path: PathBuf) -> Self {
-        Self::Native(path)
+        Self::Local(path)
     }
 }
 
 impl From<PathUri> for McpServerCwd {
     fn from(uri: PathUri) -> Self {
-        Self::Uri(uri)
+        Self::Environment(uri)
     }
 }
 
@@ -89,19 +77,9 @@ impl<'de> Deserialize<'de> for McpServerCwd {
     {
         let value = String::deserialize(deserializer)?;
         Ok(match PathUri::parse(&value) {
-            Ok(uri) => Self::Uri(uri),
-            Err(_) => Self::Native(PathBuf::from(value)),
+            Ok(uri) => Self::Environment(uri),
+            Err(_) => Self::Local(PathBuf::from(value)),
         })
-    }
-}
-
-impl JsonSchema for McpServerCwd {
-    fn schema_name() -> String {
-        "McpServerCwd".to_string()
-    }
-
-    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-        String::json_schema(generator)
     }
 }
 
@@ -313,6 +291,7 @@ pub struct RawMcpServerConfig {
     #[serde(default)]
     pub env_vars: Option<Vec<McpServerEnvVar>>,
     #[serde(default)]
+    #[schemars(with = "Option<String>")]
     pub cwd: Option<McpServerCwd>,
     pub http_headers: Option<HashMap<String, String>>,
     #[serde(default)]
@@ -496,16 +475,16 @@ fn validate_remote_stdio_cwd(
     };
     let Some(cwd) = cwd else {
         return Err(format!(
-            "remote stdio MCP servers require an absolute cwd when environment_id is `{environment_id}`"
+            "remote stdio MCP servers require a file URI cwd when environment_id is `{environment_id}`"
         ));
     };
-    if cwd.is_absolute() {
-        return Ok(());
+    match cwd {
+        McpServerCwd::Environment(_) => Ok(()),
+        McpServerCwd::Local(cwd) => Err(format!(
+            "remote stdio MCP servers require a file URI cwd when environment_id is `{environment_id}`, got `{}`",
+            cwd.display()
+        )),
     }
-    Err(format!(
-        "remote stdio MCP servers require an absolute cwd when environment_id is `{environment_id}`, got `{}`",
-        cwd
-    ))
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
@@ -521,6 +500,7 @@ pub enum McpServerTransportConfig {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         env_vars: Vec<McpServerEnvVar>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(with = "Option<String>")]
         cwd: Option<McpServerCwd>,
     },
     /// https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http

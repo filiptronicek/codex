@@ -250,8 +250,10 @@ impl PathUri {
     /// Returns true when this URI is lexically equal to or below `base`.
     ///
     /// Containment is computed using URI authority and path-segment boundaries,
-    /// without consulting the host filesystem. Opaque fallback URIs created by
-    /// [`Self::from_abs_path`] only contain themselves.
+    /// without consulting the host filesystem. Percent-encoded path separators
+    /// fail closed because native path conversion may interpret them as segment
+    /// boundaries. Opaque fallback URIs created by [`Self::from_abs_path`] only
+    /// contain themselves.
     pub fn starts_with(&self, base: &Self) -> bool {
         if self == base {
             return true;
@@ -263,11 +265,11 @@ impl PathUri {
             return false;
         }
 
-        let Some(path_segments) = non_empty_path_segments(&self.0) else {
+        let Some(path_segments) = containment_path_segments(&self.0) else {
             return false;
         };
-        let Some(base_segments) = non_empty_path_segments(&base.0) else {
-            return true;
+        let Some(base_segments) = containment_path_segments(&base.0) else {
+            return false;
         };
         path_segments.starts_with(&base_segments)
     }
@@ -567,9 +569,17 @@ fn is_windows_drive_uri_segment(segment: &str) -> bool {
     matches!(segment.as_bytes(), [drive, b':'] if drive.is_ascii_alphabetic())
 }
 
-fn non_empty_path_segments(url: &Url) -> Option<Vec<&str>> {
-    url.path_segments()
-        .map(|segments| segments.filter(|segment| !segment.is_empty()).collect())
+fn containment_path_segments(url: &Url) -> Option<Vec<&str>> {
+    let segments = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    (!segments.iter().any(|segment| {
+        urlencoding::decode_binary(segment.as_bytes())
+            .iter()
+            .any(|byte| matches!(*byte, b'/' | b'\\'))
+    }))
+    .then_some(segments)
 }
 
 fn infer_opaque_path_convention(path_bytes: &[u8]) -> Option<PathConvention> {

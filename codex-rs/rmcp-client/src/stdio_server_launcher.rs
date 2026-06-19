@@ -477,10 +477,19 @@ impl ExecutorStdioServerLauncher {
             env_vars,
             cwd,
         } = command;
-        let Some(cwd) = cwd else {
-            return Err(io::Error::other(
-                "executor stdio server requires an explicit cwd",
-            ));
+        let cwd = match cwd {
+            Some(McpServerCwd::Environment(cwd)) => cwd,
+            Some(McpServerCwd::Local(cwd)) => {
+                return Err(io::Error::other(format!(
+                    "executor stdio server requires a file URI cwd, got `{}`",
+                    cwd.display()
+                )));
+            }
+            None => {
+                return Err(io::Error::other(
+                    "executor stdio server requires an explicit cwd",
+                ));
+            }
         };
         let program_name = program.to_string_lossy().into_owned();
         let envs = create_env_overlay_for_remote_mcp_server(env, &env_vars);
@@ -491,7 +500,6 @@ impl ExecutorStdioServerLauncher {
         // before sending an executor request.
         let argv = Self::process_api_argv(&program, &args).map_err(io::Error::other)?;
         let env = Self::process_api_env(envs).map_err(io::Error::other)?;
-        let cwd = cwd.to_path_uri()?;
         let process_id = ExecutorProcessTransport::next_process_id();
         // Start the MCP server process on the executor with raw pipes. `tty=false`
         // keeps stdout as a clean protocol stream, while `pipe_stdin=true` lets

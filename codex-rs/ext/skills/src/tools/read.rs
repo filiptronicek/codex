@@ -63,16 +63,15 @@ impl ToolExecutor<ToolCall> for ReadTool {
 
             let catalog = self.context.catalog(&call.turn_id, args.authority).await;
             let Some(entry) = catalog.entries.iter().find(|entry| {
-                entry.enabled
-                    && entry.authority == authority
-                    && entry.id.0 == args.package
+                entry.enabled && entry.authority == authority && entry.id.0 == args.package
             }) else {
                 return Err(FunctionCallError::RespondToModel(
                     "skill package is not available from the requested authority".to_string(),
                 ));
             };
 
-            let Some(requested_resource) = entry.main_prompt.resolve_resource(&args.resource) else {
+            let Some(requested_resource) = entry.main_prompt.resolve_resource(&args.resource)
+            else {
                 return Err(FunctionCallError::RespondToModel(
                     "skill resource is not available from the requested package".to_string(),
                 ));

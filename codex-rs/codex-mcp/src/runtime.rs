@@ -91,21 +91,23 @@ fn ensure_remote_stdio_cwd(
     server_name: &str,
     config: &codex_config::McpServerConfig,
 ) -> Result<(), String> {
+    use codex_config::McpServerCwd;
+
     let codex_config::McpServerTransportConfig::Stdio { cwd, .. } = &config.transport else {
         return Ok(());
     };
     let Some(cwd) = cwd else {
         return Err(format!(
-            "remote stdio MCP server `{server_name}` requires an absolute cwd"
+            "remote stdio MCP server `{server_name}` requires a file URI cwd"
         ));
     };
-    if cwd.is_absolute() {
-        return Ok(());
+    match cwd {
+        McpServerCwd::Environment(_) => Ok(()),
+        McpServerCwd::Local(cwd) => Err(format!(
+            "remote stdio MCP server `{server_name}` requires a file URI cwd, got `{}`",
+            cwd.display()
+        )),
     }
-    Err(format!(
-        "remote stdio MCP server `{server_name}` requires an absolute cwd, got `{}`",
-        cwd
-    ))
 }
 
 pub(crate) fn emit_duration(metric: &str, duration: Duration, tags: &[(&str, &str)]) {
@@ -235,7 +237,7 @@ mod tests {
         let McpServerTransportConfig::Stdio { cwd, .. } = &mut remote_stdio.transport else {
             unreachable!("stdio helper should build stdio transport");
         };
-        *cwd = Some(std::env::temp_dir().into());
+        *cwd = Some(PathUri::parse("file:///tmp").expect("cwd URI").into());
         for resolved_runtime in [
             runtime_context.resolve_server_environment("stdio", &remote_stdio),
             runtime_context.resolve_server_environment("http", &http_server("remote")),
@@ -295,7 +297,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_stdio_requires_absolute_cwd() {
+    async fn remote_stdio_rejects_local_cwd() {
         let runtime_context = McpRuntimeContext::new(
             Arc::new(
                 EnvironmentManager::create_for_tests(
@@ -310,15 +312,19 @@ mod tests {
         let McpServerTransportConfig::Stdio { cwd, .. } = &mut remote_stdio.transport else {
             unreachable!("stdio helper should build stdio transport");
         };
-        *cwd = Some(PathBuf::from("relative").into());
+        let local_cwd = std::env::temp_dir();
+        *cwd = Some(local_cwd.clone().into());
 
         let error = match runtime_context.resolve_server_environment("stdio", &remote_stdio) {
-            Ok(_) => panic!("remote stdio MCP should require absolute cwd"),
+            Ok(_) => panic!("remote stdio MCP should require a file URI cwd"),
             Err(error) => error,
         };
         assert_eq!(
             error,
-            "remote stdio MCP server `stdio` requires an absolute cwd, got `relative`"
+            format!(
+                "remote stdio MCP server `stdio` requires a file URI cwd, got `{}`",
+                local_cwd.display()
+            )
         );
     }
 }
