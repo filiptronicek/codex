@@ -2588,6 +2588,7 @@ mod tests {
                 approvals_reviewer: v2::ApprovalsReviewer::User,
                 sandbox: v2::SandboxPolicy::DangerFullAccess,
                 active_permission_profile: None,
+                active_permission_preset_id: None,
                 reasoning_effort: None,
                 multi_agent_mode: None,
             },
@@ -2637,6 +2638,7 @@ mod tests {
                         "type": "dangerFullAccess"
                     },
                     "activePermissionProfile": null,
+                    "activePermissionPresetId": null,
                     "reasoningEffort": null,
                     "multiAgentMode": null
                 }
@@ -3540,6 +3542,7 @@ mod tests {
                     approvals_reviewer: v2::ApprovalsReviewer::User,
                     sandbox_policy: v2::SandboxPolicy::DangerFullAccess,
                     active_permission_profile: None,
+                    active_permission_preset_id: None,
                     model: "gpt-5.4".to_string(),
                     model_provider: "openai".to_string(),
                     service_tier: None,
