@@ -76,12 +76,16 @@ impl SkillResourceId {
     pub fn environment(
         id: impl Into<String>,
         environment_id: impl Into<String>,
+        package_root: PathUri,
         path: PathUri,
     ) -> Self {
+        let id = id.into();
         Self {
-            id: id.into(),
+            id: id.clone(),
             environment_path: Some(EnvironmentSkillResource {
                 environment_id: environment_id.into(),
+                package_id: id,
+                package_root,
                 path,
             }),
         }
@@ -91,16 +95,53 @@ impl SkillResourceId {
         &self.id
     }
 
-    pub(crate) fn environment_path(&self) -> Option<(&str, &PathUri)> {
-        self.environment_path
-            .as_ref()
-            .map(|resource| (resource.environment_id.as_str(), &resource.path))
+    pub(crate) fn environment_path(&self) -> Option<(&str, &str, &PathUri)> {
+        self.environment_path.as_ref().map(|resource| {
+            (
+                resource.environment_id.as_str(),
+                resource.package_id.as_str(),
+                &resource.path,
+            )
+        })
+    }
+
+    pub(crate) fn resolve_resource(&self, requested_id: &str) -> Option<Self> {
+        let Some(resource) = &self.environment_path else {
+            return Some(Self::new(requested_id));
+        };
+        if requested_id == resource.package_id {
+            return Some(self.clone());
+        }
+        let package_prefix = resource.package_id.rsplit_once('/')?.0;
+        let relative_path = requested_id.strip_prefix(package_prefix)?.strip_prefix('/')?;
+        if relative_path.is_empty()
+            || relative_path
+                .split(['/', '\\'])
+                .any(|component| component.is_empty() || component == "." || component == "..")
+        {
+            return None;
+        }
+        let path = resource.package_root.join(relative_path).ok()?;
+        if !path.starts_with(&resource.package_root) {
+            return None;
+        }
+        Some(Self {
+            id: requested_id.to_string(),
+            environment_path: Some(EnvironmentSkillResource {
+                environment_id: resource.environment_id.clone(),
+                package_id: resource.package_id.clone(),
+                package_root: resource.package_root.clone(),
+                path,
+            }),
+        })
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct EnvironmentSkillResource {
     environment_id: String,
+    package_id: String,
+    package_root: PathUri,
     path: PathUri,
 }
 

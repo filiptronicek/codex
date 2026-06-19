@@ -368,7 +368,7 @@ async fn root_qualified_locator_selects_only_the_matching_executor_skill() -> Te
                 id: id.to_string(),
                 location: CapabilityRootLocation::Environment {
                     environment_id: "env-1".to_string(),
-                    path: PathUri::from_path(path).expect("path URI"),
+                    path: PathUri::parse(&format!("file://{path}")).expect("path URI"),
                 },
             })
             .collect::<Vec<_>>(),

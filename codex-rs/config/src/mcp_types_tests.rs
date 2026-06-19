@@ -102,7 +102,7 @@ fn deserialize_remote_stdio_server_accepts_absolute_cwd() {
             args: vec![],
             env: None,
             env_vars: Vec::new(),
-            cwd: Some(cwd),
+            cwd: Some(cwd.into()),
         }
     );
 }
@@ -223,8 +223,30 @@ fn deserialize_stdio_command_server_config_with_cwd() {
             args: vec![],
             env: None,
             env_vars: Vec::new(),
-            cwd: Some(PathBuf::from("/tmp")),
+            cwd: Some(PathBuf::from("/tmp").into()),
         }
+    );
+}
+
+#[test]
+fn deserialize_remote_stdio_server_preserves_foreign_cwd_uri() {
+    let cfg: McpServerConfig = toml::from_str(
+        r#"
+            command = "echo"
+            environment_id = "remote"
+            cwd = "file:///C:/plugins/demo"
+        "#,
+    )
+    .expect("foreign cwd URI should deserialize");
+
+    let McpServerTransportConfig::Stdio { cwd, .. } = cfg.transport else {
+        panic!("expected stdio transport");
+    };
+    assert_eq!(
+        cwd,
+        Some(McpServerCwd::Uri(
+            PathUri::parse("file:///C:/plugins/demo").unwrap()
+        ))
     );
 }
 

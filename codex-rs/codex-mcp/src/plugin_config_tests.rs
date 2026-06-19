@@ -5,6 +5,7 @@ use super::parse_executor_plugin_mcp_config;
 use super::parse_plugin_mcp_config;
 use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::McpServerConfig;
+use codex_config::McpServerCwd;
 use codex_config::McpServerEnvVar;
 use codex_config::McpServerOAuthConfig;
 use codex_config::McpServerTransportConfig;
@@ -12,7 +13,6 @@ use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::path::Path;
 use std::path::PathBuf;
 
 fn plugin_root() -> PathBuf {
@@ -24,7 +24,7 @@ fn plugin_root() -> PathBuf {
 fn stdio_server(
     command: &str,
     environment_id: &str,
-    cwd: &Path,
+    cwd: McpServerCwd,
     env_vars: Vec<McpServerEnvVar>,
 ) -> McpServerConfig {
     McpServerConfig {
@@ -33,7 +33,7 @@ fn stdio_server(
             args: Vec::new(),
             env: None,
             env_vars,
-            cwd: Some(cwd.to_path_buf()),
+            cwd: Some(cwd),
         },
         environment_id: environment_id.to_string(),
         enabled: true,
@@ -58,7 +58,7 @@ fn declared_placement_preserves_local_plugin_normalization() {
     let expected_stdio = stdio_server(
         "demo-mcp",
         "configured-environment",
-        &plugin_root.join("scripts"),
+        plugin_root.join("scripts").into(),
         Vec::new(),
     );
     let expected_http = McpServerConfig {
@@ -145,7 +145,7 @@ fn environment_placement_forces_authority_and_defaults_null_cwd() {
                 stdio_server(
                     "demo-mcp",
                     "executor-1",
-                    &plugin_root,
+                    plugin_root.clone().into(),
                     vec![
                         McpServerEnvVar::Config {
                             name: "EXECUTOR_TOKEN".to_string(),
@@ -183,7 +183,7 @@ fn environment_placement_resolves_relative_cwd_beneath_plugin_root() {
                 stdio_server(
                     "demo-mcp",
                     "executor-1",
-                    &plugin_root.join("scripts"),
+                    plugin_root.join("scripts").into(),
                     Vec::new(),
                 ),
             )]),
@@ -210,7 +210,9 @@ fn executor_environment_placement_resolves_foreign_uri_cwd() {
                 stdio_server(
                     "demo-mcp",
                     "executor-1",
-                    Path::new(r"C:\plugins\demo\scripts"),
+                    McpServerCwd::Uri(
+                        plugin_root.join("scripts").expect("executor cwd URI"),
+                    ),
                     Vec::new(),
                 ),
             )]),
@@ -292,7 +294,7 @@ fn local_environment_placement_preserves_local_env_vars() {
                 stdio_server(
                     "demo-mcp",
                     DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
-                    &plugin_root,
+                    plugin_root.clone().into(),
                     vec![
                         McpServerEnvVar::Name("TOKEN".to_string()),
                         McpServerEnvVar::Config {

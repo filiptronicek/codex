@@ -9,7 +9,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::catalog::SkillPackageId;
-use crate::catalog::SkillResourceId;
 use crate::provider::SkillReadRequest;
 
 use super::MAX_HANDLE_BYTES;
@@ -67,14 +66,17 @@ impl ToolExecutor<ToolCall> for ReadTool {
                 entry.enabled
                     && entry.authority == authority
                     && entry.id.0 == args.package
-                    && entry.main_prompt.as_str() == args.resource
             }) else {
                 return Err(FunctionCallError::RespondToModel(
                     "skill package is not available from the requested authority".to_string(),
                 ));
             };
 
-            let requested_resource = entry.main_prompt.clone();
+            let Some(requested_resource) = entry.main_prompt.resolve_resource(&args.resource) else {
+                return Err(FunctionCallError::RespondToModel(
+                    "skill resource is not available from the requested package".to_string(),
+                ));
+            };
             let result = self
                 .context
                 .thread_state

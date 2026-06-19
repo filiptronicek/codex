@@ -1,3 +1,9 @@
+mod environment;
+
+pub use environment::EnvironmentSkillLoadOutcome;
+pub use environment::EnvironmentSkillMetadata;
+pub use environment::load_environment_skills_from_root;
+
 use crate::model::SkillDependencies;
 use crate::model::SkillError;
 use crate::model::SkillInterface;

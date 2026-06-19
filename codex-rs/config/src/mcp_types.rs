@@ -2,9 +2,11 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use codex_utils_path_uri::PathUri;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -15,6 +17,93 @@ use crate::RequirementSource;
 
 /// Effective MCP environment id when config omits `environment_id`.
 pub const DEFAULT_MCP_SERVER_ENVIRONMENT_ID: &str = "local";
+
+/// Working directory for an MCP stdio server.
+///
+/// Local configuration keeps native paths, including relative paths. Executor
+/// configuration keeps a `file:` URI so foreign paths are never interpreted
+/// using the orchestrator host's path rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpServerCwd {
+    Native(PathBuf),
+    Uri(PathUri),
+}
+
+impl McpServerCwd {
+    pub fn is_absolute(&self) -> bool {
+        match self {
+            Self::Native(path) => path.is_absolute(),
+            Self::Uri(_) => true,
+        }
+    }
+
+    pub fn to_local_path(&self) -> io::Result<PathBuf> {
+        match self {
+            Self::Native(path) => Ok(path.clone()),
+            Self::Uri(uri) => uri.to_abs_path().map(Into::into),
+        }
+    }
+
+    pub fn to_path_uri(&self) -> io::Result<PathUri> {
+        match self {
+            Self::Native(path) => PathUri::from_path(path),
+            Self::Uri(uri) => Ok(uri.clone()),
+        }
+    }
+}
+
+impl fmt::Display for McpServerCwd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Native(path) => path.display().fmt(f),
+            Self::Uri(uri) => uri.fmt(f),
+        }
+    }
+}
+
+impl From<PathBuf> for McpServerCwd {
+    fn from(path: PathBuf) -> Self {
+        Self::Native(path)
+    }
+}
+
+impl From<PathUri> for McpServerCwd {
+    fn from(uri: PathUri) -> Self {
+        Self::Uri(uri)
+    }
+}
+
+impl Serialize for McpServerCwd {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for McpServerCwd {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match PathUri::parse(&value) {
+            Ok(uri) => Self::Uri(uri),
+            Err(_) => Self::Native(PathBuf::from(value)),
+        })
+    }
+}
+
+impl JsonSchema for McpServerCwd {
+    fn schema_name() -> String {
+        "McpServerCwd".to_string()
+    }
+
+    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        String::json_schema(generator)
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -224,7 +313,7 @@ pub struct RawMcpServerConfig {
     #[serde(default)]
     pub env_vars: Option<Vec<McpServerEnvVar>>,
     #[serde(default)]
-    pub cwd: Option<PathBuf>,
+    pub cwd: Option<McpServerCwd>,
     pub http_headers: Option<HashMap<String, String>>,
     #[serde(default)]
     pub env_http_headers: Option<HashMap<String, String>>,
@@ -415,7 +504,7 @@ fn validate_remote_stdio_cwd(
     }
     Err(format!(
         "remote stdio MCP servers require an absolute cwd when environment_id is `{environment_id}`, got `{}`",
-        cwd.display()
+        cwd
     ))
 }
 
@@ -432,7 +521,7 @@ pub enum McpServerTransportConfig {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         env_vars: Vec<McpServerEnvVar>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        cwd: Option<PathBuf>,
+        cwd: Option<McpServerCwd>,
     },
     /// https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http
     StreamableHttp {

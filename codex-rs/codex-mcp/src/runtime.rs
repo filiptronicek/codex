@@ -5,7 +5,6 @@
 //! tiny shared metrics helper. Transport startup and orchestration live in
 //! [`crate::rmcp_client`] and [`crate::connection_manager`].
 
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +13,6 @@ use codex_exec_server::Environment;
 use codex_exec_server::EnvironmentManager;
 use codex_protocol::models::PermissionProfile;
 use codex_utils_path_uri::PathUri;
-
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -101,32 +99,13 @@ fn ensure_remote_stdio_cwd(
             "remote stdio MCP server `{server_name}` requires an absolute cwd"
         ));
     };
-    if remote_stdio_cwd_is_absolute(cwd) {
+    if cwd.is_absolute() {
         return Ok(());
     }
     Err(format!(
         "remote stdio MCP server `{server_name}` requires an absolute cwd, got `{}`",
-        cwd.display()
+        cwd
     ))
-}
-
-fn remote_stdio_cwd_is_absolute(cwd: &Path) -> bool {
-    if cwd.is_absolute() {
-        return true;
-    }
-    let cwd = cwd.to_string_lossy();
-    PathUri::parse(&cwd).is_ok() || native_path_str_is_absolute(&cwd)
-}
-
-fn native_path_str_is_absolute(path: &str) -> bool {
-    path.starts_with('/')
-        || path.starts_with(r"\\")
-        || matches!(
-            path.as_bytes(),
-            [drive, b':', separator, ..]
-                if drive.is_ascii_alphabetic()
-                    && matches!(separator, b'/' | b'\\')
-        )
 }
 
 pub(crate) fn emit_duration(metric: &str, duration: Duration, tags: &[(&str, &str)]) {
@@ -256,7 +235,7 @@ mod tests {
         let McpServerTransportConfig::Stdio { cwd, .. } = &mut remote_stdio.transport else {
             unreachable!("stdio helper should build stdio transport");
         };
-        *cwd = Some(std::env::temp_dir());
+        *cwd = Some(std::env::temp_dir().into());
         for resolved_runtime in [
             runtime_context.resolve_server_environment("stdio", &remote_stdio),
             runtime_context.resolve_server_environment("http", &http_server("remote")),
@@ -285,7 +264,11 @@ mod tests {
         let McpServerTransportConfig::Stdio { cwd, .. } = &mut remote_stdio.transport else {
             unreachable!("stdio helper should build stdio transport");
         };
-        *cwd = Some(PathBuf::from(r"C:\plugins\demo"));
+        *cwd = Some(
+            PathUri::parse("file:///C:/plugins/demo")
+                .expect("foreign cwd URI")
+                .into(),
+        );
 
         let resolved_runtime =
             match runtime_context.resolve_server_environment("stdio", &remote_stdio) {
@@ -327,7 +310,7 @@ mod tests {
         let McpServerTransportConfig::Stdio { cwd, .. } = &mut remote_stdio.transport else {
             unreachable!("stdio helper should build stdio transport");
         };
-        *cwd = Some(PathBuf::from("relative"));
+        *cwd = Some(PathBuf::from("relative").into());
 
         let error = match runtime_context.resolve_server_environment("stdio", &remote_stdio) {
             Ok(_) => panic!("remote stdio MCP should require absolute cwd"),

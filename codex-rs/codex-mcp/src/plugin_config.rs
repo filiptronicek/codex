@@ -100,7 +100,7 @@ impl PluginMcpRoot<'_> {
             Some(cwd) => executor_plugin_cwd(self, cwd),
             None => Ok(match self {
                 Self::Host(path) => path.to_string_lossy().into_owned(),
-                Self::Uri(path) => path.inferred_native_path_string(),
+                Self::Uri(path) => path.to_string(),
             }),
         }
     }
@@ -176,10 +176,16 @@ fn executor_plugin_cwd(
     configured_cwd: &str,
 ) -> Result<String, String> {
     if let Ok(cwd) = PathUri::parse(configured_cwd) {
-        return Ok(cwd.inferred_native_path_string());
+        return Ok(cwd.to_string());
     }
     if native_path_str_is_absolute(configured_cwd) {
-        return Ok(configured_cwd.to_string());
+        return match plugin_root {
+            PluginMcpRoot::Host(_) => Ok(configured_cwd.to_string()),
+            PluginMcpRoot::Uri(path) => path
+                .join(configured_cwd)
+                .map(|cwd| cwd.to_string())
+                .map_err(|err| format!("invalid cwd `{configured_cwd}`: {err}")),
+        };
     }
     let cwd = Path::new(configured_cwd);
     if cwd
@@ -199,7 +205,7 @@ fn executor_plugin_cwd(
         PluginMcpRoot::Host(path) => Ok(path.join(cwd).to_string_lossy().into_owned()),
         PluginMcpRoot::Uri(path) => path
             .join(configured_cwd)
-            .map(|cwd| cwd.inferred_native_path_string())
+            .map(|cwd| cwd.to_string())
             .map_err(|err| {
                 format!(
                     "relative cwd `{configured_cwd}` must remain within plugin root `{}`: {err}",
