@@ -6,14 +6,12 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use crate::CellOutcome;
 use crate::CodeModeNestedToolCall;
-use crate::ExecuteRequest;
-use crate::RuntimeResponse;
-use crate::WaitOutcome;
-use crate::WaitRequest;
+use crate::CreateCellRequest;
+use crate::ObserveRequest;
 
 pub type CodeModeSessionResultFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
@@ -45,42 +43,6 @@ impl AsRef<str> for CellId {
 impl fmt::Display for CellId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
-    }
-}
-
-pub struct StartedCell {
-    pub cell_id: CellId,
-    initial_response: CodeModeSessionResultFuture<'static, RuntimeResponse>,
-}
-
-impl StartedCell {
-    pub fn new(cell_id: CellId, initial_response_rx: oneshot::Receiver<RuntimeResponse>) -> Self {
-        Self {
-            cell_id,
-            initial_response: Box::pin(async move {
-                initial_response_rx
-                    .await
-                    .map_err(|_| "exec runtime ended unexpectedly".to_string())
-            }),
-        }
-    }
-
-    pub fn from_result_receiver(
-        cell_id: CellId,
-        initial_response_rx: oneshot::Receiver<Result<RuntimeResponse, String>>,
-    ) -> Self {
-        Self {
-            cell_id,
-            initial_response: Box::pin(async move {
-                initial_response_rx
-                    .await
-                    .map_err(|_| "exec runtime ended unexpectedly".to_string())?
-            }),
-        }
-    }
-
-    pub async fn initial_response(self) -> Result<RuntimeResponse, String> {
-        self.initial_response.await
     }
 }
 
@@ -116,14 +78,17 @@ pub trait CodeModeSession: Send + Sync {
     /// connection fails so callers can create a fresh session for later work.
     fn is_alive(&self) -> bool;
 
-    fn execute<'a>(
+    fn create_cell<'a>(
         &'a self,
-        request: ExecuteRequest,
-    ) -> CodeModeSessionResultFuture<'a, StartedCell>;
+        request: CreateCellRequest,
+    ) -> CodeModeSessionResultFuture<'a, CellId>;
 
-    fn wait<'a>(&'a self, request: WaitRequest) -> CodeModeSessionResultFuture<'a, WaitOutcome>;
+    fn observe<'a>(
+        &'a self,
+        request: ObserveRequest,
+    ) -> CodeModeSessionResultFuture<'a, CellOutcome>;
 
-    fn terminate<'a>(&'a self, cell_id: CellId) -> CodeModeSessionResultFuture<'a, WaitOutcome>;
+    fn terminate<'a>(&'a self, cell_id: CellId) -> CodeModeSessionResultFuture<'a, CellOutcome>;
 
     fn shutdown<'a>(&'a self) -> CodeModeSessionResultFuture<'a, ()>;
 }
@@ -138,7 +103,3 @@ pub trait CodeModeSessionProvider: Send + Sync {
         delegate: Arc<dyn CodeModeSessionDelegate>,
     ) -> CodeModeSessionProviderFuture<'a>;
 }
-
-#[cfg(test)]
-#[path = "session_tests.rs"]
-mod tests;

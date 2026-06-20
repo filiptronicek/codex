@@ -39,20 +39,17 @@ impl CodeModeExecuteHandler {
         let enabled_tools =
             codex_tools::collect_code_mode_tool_definitions(&self.nested_tool_specs);
         let started_at = std::time::Instant::now();
-        let started_cell = exec
+        let cell_id = exec
             .session
             .services
             .code_mode_service
-            .execute(codex_code_mode::ExecuteRequest {
+            .create_cell(codex_code_mode::CreateCellRequest {
                 tool_call_id: call_id.clone(),
                 enabled_tools,
                 source: args.code.clone(),
-                yield_time_ms: args.yield_time_ms,
-                max_output_tokens: args.max_output_tokens,
             })
             .await
             .map_err(FunctionCallError::RespondToModel)?;
-        let cell_id = started_cell.cell_id.clone();
         let runtime_cell_id = cell_id.to_string();
         let code_cell_trace = exec
             .session
@@ -68,10 +65,19 @@ impl CodeModeExecuteHandler {
             .services
             .code_mode_service
             .mark_cell_ready_for_dispatch(&cell_id);
-        let response = started_cell
-            .initial_response()
+        let response: codex_code_mode::RuntimeResponse = exec
+            .session
+            .services
+            .code_mode_service
+            .observe(codex_code_mode::ObserveRequest {
+                cell_id: cell_id.clone(),
+                yield_time_ms: args
+                    .yield_time_ms
+                    .unwrap_or(codex_code_mode::DEFAULT_EXEC_YIELD_TIME_MS),
+            })
             .await
-            .map_err(FunctionCallError::RespondToModel)?;
+            .map_err(FunctionCallError::RespondToModel)?
+            .into();
         // Record the raw runtime boundary. The model-visible custom-tool output
         // is produced by `handle_runtime_response` and later linked through
         // `CodeCell.output_item_ids` in the reduced trace.

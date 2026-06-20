@@ -74,24 +74,24 @@ impl CodeModeService {
         }
     }
 
-    pub(crate) async fn execute(
+    pub(crate) async fn create_cell(
         &self,
-        request: codex_code_mode::ExecuteRequest,
-    ) -> Result<codex_code_mode::StartedCell, String> {
-        self.session()?.execute(request).await
+        request: codex_code_mode::CreateCellRequest,
+    ) -> Result<CellId, String> {
+        self.session()?.create_cell(request).await
     }
 
-    pub(crate) async fn wait(
+    pub(crate) async fn observe(
         &self,
-        request: codex_code_mode::WaitRequest,
-    ) -> Result<codex_code_mode::WaitOutcome, String> {
-        self.session()?.wait(request).await
+        request: codex_code_mode::ObserveRequest,
+    ) -> Result<codex_code_mode::CellOutcome, String> {
+        self.session()?.observe(request).await
     }
 
     pub(crate) async fn terminate(
         &self,
         cell_id: CellId,
-    ) -> Result<codex_code_mode::WaitOutcome, String> {
+    ) -> Result<codex_code_mode::CellOutcome, String> {
         self.session()?.terminate(cell_id).await
     }
 
