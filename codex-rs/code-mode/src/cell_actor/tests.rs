@@ -33,7 +33,14 @@ impl CellHost for TestHost {
         Ok(())
     }
 
-    async fn commit_stored_values(&self, _stored_value_writes: HashMap<String, JsonValue>) {}
+    async fn commit_completion(
+        &self,
+        _stored_value_writes: HashMap<String, JsonValue>,
+        event: CellEvent,
+        cell_state: Arc<CellState>,
+    ) -> bool {
+        cell_state.commit_completion(event, || {})
+    }
 
     async fn closed(&self) {}
 }
@@ -64,14 +71,15 @@ fn spawn_cell_actor_harness(initial_observe_mode: ObserveMode) -> CellActorHarne
         PendingRuntimeMode::PauseUntilResumed,
     )
     .unwrap();
-    let handle = CellHandle::new(command_tx, CancellationToken::new());
+    let cell_state = Arc::new(CellState::new(CancellationToken::new()));
+    let handle = CellHandle::new(command_tx, Arc::clone(&cell_state));
     let task = tokio::spawn(run_cell(
         Arc::new(TestHost),
         CellContext {
             runtime_tx,
             runtime_control_tx,
             runtime_terminate_handle,
-            cancellation_token: CancellationToken::new(),
+            cell_state,
         },
         event_rx,
         command_rx,
@@ -141,4 +149,31 @@ async fn queued_termination_preempts_unobserved_runtime_completion() {
     assert_eq!(termination.await, terminated.clone());
     assert_eq!(harness.initial_event_rx.await.unwrap(), terminated);
     harness.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn only_the_first_termination_claims_a_buffered_completion() {
+    let cell_state = CellState::new(CancellationToken::new());
+    let completion = CellEvent::Completed {
+        content_items: Vec::new(),
+        error_text: None,
+    };
+    assert!(cell_state.commit_completion(completion.clone(), || {}));
+    assert!(matches!(
+        cell_state.deliver_completion(/*response_tx*/ None),
+        CompletionDelivery::Buffered
+    ));
+
+    let first_termination = cell_state.request_termination();
+    assert_eq!(
+        cell_state.request_termination().await,
+        Err(CellError::AlreadyTerminating)
+    );
+    assert_eq!(first_termination.await, Ok(completion.clone()));
+    assert_eq!(
+        cell_state.finish_termination(CellEvent::Terminated {
+            content_items: Vec::new(),
+        }),
+        Some(completion)
+    );
 }

@@ -25,7 +25,10 @@ pub(crate) use self::types::CellError;
 pub(crate) use self::types::CellEventFuture;
 pub(crate) use self::types::CellHandle;
 pub(crate) use self::types::CellHost;
+pub(crate) use self::types::CellState;
 pub(crate) use self::types::CellToolCall;
+use self::types::CompletionDelivery;
+use self::types::ObservationDelivery;
 use crate::runtime::PendingRuntimeMode;
 use crate::runtime::RuntimeCommand;
 use crate::runtime::RuntimeControlCommand;
@@ -44,6 +47,7 @@ impl CellActor {
         stored_values: HashMap<String, JsonValue>,
         host: Arc<H>,
         initial_observe_mode: ObserveMode,
+        cell_state: Arc<CellState>,
     ) -> Result<
         (
             CellHandle,
@@ -61,15 +65,14 @@ impl CellActor {
             event_tx,
             PendingRuntimeMode::PauseUntilResumed,
         )?;
-        let cancellation_token = CancellationToken::new();
-        let handle = CellHandle::new(command_tx, cancellation_token.clone());
+        let handle = CellHandle::new(command_tx, Arc::clone(&cell_state));
         let task = run_cell(
             host,
             CellContext {
                 runtime_tx,
                 runtime_control_tx,
                 runtime_terminate_handle,
-                cancellation_token,
+                cell_state,
             },
             event_rx,
             command_rx,
@@ -88,7 +91,7 @@ struct CellContext {
     runtime_tx: std::sync::mpsc::Sender<RuntimeCommand>,
     runtime_control_tx: std::sync::mpsc::Sender<RuntimeControlCommand>,
     runtime_terminate_handle: v8::IsolateHandle,
-    cancellation_token: CancellationToken,
+    cell_state: Arc<CellState>,
 }
 
 struct Observer {
@@ -96,115 +99,98 @@ struct Observer {
     response_tx: oneshot::Sender<Result<CellEvent, CellError>>,
 }
 
-struct Termination {
-    response_tx: Option<oneshot::Sender<Result<CellEvent, CellError>>>,
-}
-
 async fn run_cell<H: CellHost>(
     host: Arc<H>,
     context: CellContext,
     mut event_rx: mpsc::UnboundedReceiver<RuntimeEvent>,
-    mut command_rx: mpsc::UnboundedReceiver<CellCommand>,
+    command_rx: mpsc::UnboundedReceiver<CellCommand>,
     initial_observer: Observer,
 ) {
     let CellContext {
         runtime_tx,
         runtime_control_tx,
         runtime_terminate_handle,
-        cancellation_token,
+        cell_state,
     } = context;
+    let cancellation_token = cell_state.cancellation_token();
+    let callback_cancellation_token = cancellation_token.child_token();
     let mut content_items = Vec::new();
     let mut pending_tool_call_ids = Vec::new();
-    let mut completed_event = None;
     let mut observer = Some(initial_observer);
-    let mut termination: Option<Termination> = None;
+    let mut termination = false;
     let mut runtime_closed = false;
     let mut runtime_paused = false;
     let mut yield_timer: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     let mut notification_tasks = JoinSet::new();
     let mut tool_tasks = JoinSet::new();
-
+    let mut command_rx = Some(command_rx);
     loop {
         let yield_deadline_elapsed = yield_timer
             .as_ref()
             .is_some_and(|yield_timer| yield_timer.deadline() <= tokio::time::Instant::now());
         tokio::select! {
             biased;
-            maybe_command = command_rx.recv() => {
-                let Some(command) = maybe_command else {
-                    if completed_event.is_some() {
-                        break;
-                    }
-                    termination = Some(Termination { response_tx: None });
-                    begin_termination(
-                        &runtime_tx,
-                        &runtime_control_tx,
-                        &runtime_terminate_handle,
-                        &cancellation_token,
+            _ = cancellation_token.cancelled(), if !termination => {
+                termination = true;
+                yield_timer = None;
+                drop(command_rx.take());
+                begin_termination(
+                    &runtime_tx,
+                    &runtime_control_tx,
+                    &runtime_terminate_handle,
+                    &cancellation_token,
+                );
+                if runtime_closed {
+                    finish_callbacks(
+                        &callback_cancellation_token,
+                        &mut notification_tasks,
+                        &mut tool_tasks,
+                        CallbackCompletion::Cancel,
+                    ).await;
+                    finish_termination(
+                        &cell_state,
+                        observer.take().map(|observer| observer.response_tx),
+                        CellEvent::Terminated {
+                            content_items: std::mem::take(&mut content_items),
+                        },
                     );
-                    if runtime_closed {
-                        break;
-                    }
+                    break;
+                }
+            }
+            maybe_command = async {
+                match command_rx.as_mut() {
+                    Some(command_rx) => command_rx.recv().await,
+                    None => std::future::pending::<Option<CellCommand>>().await,
+                }
+            } => {
+                let Some(CellCommand::Observe { mode, response_tx }) = maybe_command else {
+                    cancellation_token.cancel();
                     continue;
                 };
-                match command {
-                    CellCommand::Observe { mode, response_tx } => {
-                        if let Some(event) = completed_event.take() {
-                            let _ = response_tx.send(Ok(event));
-                            break;
-                        }
-                        if observer.is_some() || termination.is_some() {
-                            let _ = response_tx.send(Err(CellError::Busy));
-                            continue;
-                        }
-                        observer = Some(Observer { mode, response_tx });
-                        yield_timer = observer.as_ref().and_then(observer_timer);
-                        resume_for_observation(
-                            mode,
-                            &mut runtime_paused,
-                            &runtime_tx,
-                            &runtime_control_tx,
-                        );
-                    }
-                    CellCommand::Terminate { response_tx } => {
-                        if let Some(event) = completed_event.take() {
-                            if let Some(response_tx) = response_tx {
-                                let _ = response_tx.send(Ok(event));
-                            }
-                            break;
-                        }
-                        if termination.is_some() {
-                            if let Some(response_tx) = response_tx {
-                                let _ = response_tx.send(Err(CellError::AlreadyTerminating));
-                            }
-                            continue;
-                        }
-                        termination = Some(Termination { response_tx });
-                        yield_timer = None;
-                        begin_termination(
-                            &runtime_tx,
-                            &runtime_control_tx,
-                            &runtime_terminate_handle,
-                            &cancellation_token,
-                        );
-                        if runtime_closed {
-                            finish_callbacks(
-                                &cancellation_token,
-                                &mut notification_tasks,
-                                &mut tool_tasks,
-                                CallbackCompletion::Cancel,
-                            ).await;
-                            send_termination_events(
-                                observer.take(),
-                                termination.take(),
-                                CellEvent::Terminated {
-                                    content_items: std::mem::take(&mut content_items),
-                                },
-                            );
-                            break;
-                        }
-                    }
+                let response_tx = match cell_state.route_observation(response_tx) {
+                    ObservationDelivery::Running(response_tx) => response_tx,
+                    ObservationDelivery::Delivered => break,
+                    ObservationDelivery::Closed => continue,
+                };
+                if observer
+                    .as_ref()
+                    .is_some_and(|observer| observer.response_tx.is_closed())
+                {
+                    observer = None;
+                    yield_timer = None;
                 }
+                if observer.is_some() || termination {
+                    let _ = response_tx.send(Err(CellError::Busy));
+                    continue;
+                }
+                observer = Some(Observer { mode, response_tx });
+                yield_timer = observer.as_ref().and_then(observer_timer);
+                resume_for_observation(
+                    mode,
+                    &mut runtime_paused,
+                    &runtime_tx,
+                    &runtime_control_tx,
+                );
             }
             _ = async {
                 if let Some(yield_timer) = yield_timer.as_mut() {
@@ -230,38 +216,56 @@ async fn run_cell<H: CellHost>(
             }, if !yield_deadline_elapsed => {
                 let Some(event) = maybe_event else {
                     runtime_closed = true;
-                    if termination.is_some() {
+                    if termination || cancellation_token.is_cancelled() {
                         finish_callbacks(
-                            &cancellation_token,
+                            &callback_cancellation_token,
                             &mut notification_tasks,
                             &mut tool_tasks,
                             CallbackCompletion::Cancel,
                         ).await;
-                        send_termination_events(
-                            observer.take(),
-                            termination.take(),
+                        finish_termination(
+                            &cell_state,
+                            observer.take().map(|observer| observer.response_tx),
                             CellEvent::Terminated {
                                 content_items: std::mem::take(&mut content_items),
                             },
                         );
                         break;
                     }
-                    if completed_event.is_none() {
-                        finish_callbacks(
-                            &cancellation_token,
-                            &mut notification_tasks,
-                            &mut tool_tasks,
-                            CallbackCompletion::DrainNotifications,
-                        ).await;
-                        let event = CellEvent::Completed {
-                            content_items: std::mem::take(&mut content_items),
-                            error_text: Some("exec runtime ended unexpectedly".to_string()),
-                        };
-                        if send_or_buffer_completion(
-                            event,
-                            &mut observer,
-                            &mut completed_event,
-                        ) {
+                    finish_callbacks(
+                        &callback_cancellation_token,
+                        &mut notification_tasks,
+                        &mut tool_tasks,
+                        CallbackCompletion::DrainNotifications,
+                    )
+                    .await;
+                    let completion_content_items = std::mem::take(&mut content_items);
+                    let event = CellEvent::Completed {
+                        content_items: completion_content_items.clone(),
+                        error_text: Some("exec runtime ended unexpectedly".to_string()),
+                    };
+                    let _ = tokio::select! {
+                        biased;
+                        _ = cancellation_token.cancelled() => false,
+                        committed = host.commit_completion(
+                            HashMap::new(),
+                            event.clone(),
+                            Arc::clone(&cell_state),
+                        ) => committed,
+                    };
+                    match cell_state.deliver_completion(
+                        observer.take().map(|observer| observer.response_tx),
+                    ) {
+                        CompletionDelivery::Delivered => break,
+                        CompletionDelivery::Buffered => {}
+                        CompletionDelivery::Rejected(response_tx) => {
+                            finish_termination(
+                                &cell_state,
+                                response_tx,
+                                CellEvent::Terminated {
+                                    content_items: completion_content_items,
+                                },
+                            );
                             break;
                         }
                     }
@@ -314,7 +318,7 @@ async fn run_cell<H: CellHost>(
                             Arc::clone(&host),
                             call_id,
                             text,
-                            cancellation_token.child_token(),
+                            callback_cancellation_token.child_token(),
                         );
                     }
                     RuntimeEvent::ToolCall { id, name, kind, input } => {
@@ -332,22 +336,22 @@ async fn run_cell<H: CellHost>(
                                 input,
                             },
                             runtime_tx.clone(),
-                            cancellation_token.child_token(),
+                            callback_cancellation_token.child_token(),
                         );
                     }
                     RuntimeEvent::Result { stored_value_writes, error_text } => {
                         runtime_closed = true;
                         yield_timer = None;
-                        if termination.is_some() {
+                        if termination || cancellation_token.is_cancelled() {
                             finish_callbacks(
-                                &cancellation_token,
+                                &callback_cancellation_token,
                                 &mut notification_tasks,
                                 &mut tool_tasks,
                                 CallbackCompletion::Cancel,
                             ).await;
-                            send_termination_events(
-                                observer.take(),
-                                termination.take(),
+                            finish_termination(
+                                &cell_state,
+                                observer.take().map(|observer| observer.response_tx),
                                 CellEvent::Terminated {
                                     content_items: std::mem::take(&mut content_items),
                                 },
@@ -355,22 +359,41 @@ async fn run_cell<H: CellHost>(
                             break;
                         }
                         finish_callbacks(
-                            &cancellation_token,
+                            &callback_cancellation_token,
                             &mut notification_tasks,
                             &mut tool_tasks,
                             CallbackCompletion::DrainNotifications,
-                        ).await;
-                        host.commit_stored_values(stored_value_writes).await;
+                        )
+                        .await;
+                        let completion_content_items = std::mem::take(&mut content_items);
                         let event = CellEvent::Completed {
-                            content_items: std::mem::take(&mut content_items),
+                            content_items: completion_content_items.clone(),
                             error_text,
                         };
-                        if send_or_buffer_completion(
-                            event,
-                            &mut observer,
-                            &mut completed_event,
+                        let _ = tokio::select! {
+                            biased;
+                            _ = cancellation_token.cancelled() => false,
+                            committed = host.commit_completion(
+                                stored_value_writes,
+                                event.clone(),
+                                Arc::clone(&cell_state),
+                            ) => committed,
+                        };
+                        match cell_state.deliver_completion(
+                            observer.take().map(|observer| observer.response_tx),
                         ) {
-                            break;
+                            CompletionDelivery::Delivered => break,
+                            CompletionDelivery::Buffered => {}
+                            CompletionDelivery::Rejected(response_tx) => {
+                                finish_termination(
+                                    &cell_state,
+                                    response_tx,
+                                    CellEvent::Terminated {
+                                        content_items: completion_content_items,
+                                    },
+                                );
+                                break;
+                            }
                         }
                     }
                 }
@@ -383,6 +406,9 @@ async fn run_cell<H: CellHost>(
             }
         }
     }
+    // Reject requests that arrive while asynchronous terminal cleanup runs.
+    cell_state.tombstone();
+    drop(command_rx.take());
     begin_termination(
         &runtime_tx,
         &runtime_control_tx,
@@ -390,7 +416,7 @@ async fn run_cell<H: CellHost>(
         &cancellation_token,
     );
     finish_callbacks(
-        &cancellation_token,
+        &callback_cancellation_token,
         &mut notification_tasks,
         &mut tool_tasks,
         CallbackCompletion::Cancel,
@@ -399,34 +425,21 @@ async fn run_cell<H: CellHost>(
     host.closed().await;
 }
 
-fn send_or_buffer_completion(
-    event: CellEvent,
-    observer: &mut Option<Observer>,
-    completed_event: &mut Option<CellEvent>,
-) -> bool {
-    if observer.is_some() {
-        send_observer_event(observer.take(), event);
-        true
-    } else {
-        *completed_event = Some(event);
-        false
-    }
-}
-
 fn send_observer_event(observer: Option<Observer>, event: CellEvent) {
     if let Some(observer) = observer {
         let _ = observer.response_tx.send(Ok(event));
     }
 }
 
-fn send_termination_events(
-    observer: Option<Observer>,
-    termination: Option<Termination>,
+fn finish_termination(
+    cell_state: &CellState,
+    observer_tx: Option<oneshot::Sender<Result<CellEvent, CellError>>>,
     event: CellEvent,
 ) {
-    send_observer_event(observer, event.clone());
-    if let Some(response_tx) = termination.and_then(|termination| termination.response_tx) {
-        let _ = response_tx.send(Ok(event));
+    if let Some(event) = cell_state.finish_termination(event)
+        && let Some(observer_tx) = observer_tx
+    {
+        let _ = observer_tx.send(Ok(event));
     }
 }
 

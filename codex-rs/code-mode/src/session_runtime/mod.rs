@@ -29,6 +29,7 @@ use crate::cell_actor::CellError;
 use crate::cell_actor::CellEventFuture;
 use crate::cell_actor::CellHandle;
 use crate::cell_actor::CellHost;
+use crate::cell_actor::CellState;
 use crate::cell_actor::CellToolCall;
 
 type RuntimeEventFuture = Pin<Box<dyn Future<Output = Result<CellEvent, Error>> + Send + 'static>>;
@@ -165,9 +166,15 @@ impl<D: SessionRuntimeDelegate> SessionRuntime<D> {
         if cells.contains_key(&cell_id) {
             return Err(Error::DuplicateCell(cell_id));
         }
-        let (handle, initial_event, task) =
-            CellActor::prepare(request, stored_values, host, initial_observe_mode)
-                .map_err(Error::Runtime)?;
+        let cell_state = Arc::new(CellState::new(CancellationToken::new()));
+        let (handle, initial_event, task) = CellActor::prepare(
+            request,
+            stored_values,
+            host,
+            initial_observe_mode,
+            cell_state,
+        )
+        .map_err(Error::Runtime)?;
         cells.insert(cell_id.clone(), handle);
         drop(cells);
         tokio::spawn(task);
@@ -251,12 +258,14 @@ impl<D: SessionRuntimeDelegate> CellHost for RuntimeCellHost<D> {
             .await
     }
 
-    async fn commit_stored_values(&self, stored_value_writes: HashMap<String, JsonValue>) {
-        self.inner
-            .stored_values
-            .lock()
-            .await
-            .extend(stored_value_writes);
+    async fn commit_completion(
+        &self,
+        stored_value_writes: HashMap<String, JsonValue>,
+        event: CellEvent,
+        cell_state: Arc<CellState>,
+    ) -> bool {
+        let mut stored_values = self.inner.stored_values.lock().await;
+        cell_state.commit_completion(event, || stored_values.extend(stored_value_writes))
     }
 
     async fn closed(&self) {
