@@ -1,6 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use codex_protocol::ToolName;
@@ -16,50 +14,75 @@ use crate::ToolDefinition;
 #[derive(Debug, PartialEq)]
 enum DelegateEvent {
     NotificationStarted,
-    NotificationCancelled,
     ToolStarted,
-    ToolCancelled,
     CellClosed(CellId),
 }
 
 struct BlockingDelegate {
     events_tx: mpsc::UnboundedSender<DelegateEvent>,
-    notification_finished: AtomicBool,
-    tool_finished: AtomicBool,
     tool_release: Notify,
 }
 
-struct HeldNotificationDelegate {
+struct NeverResolvingNotificationDelegate {
     events_tx: mpsc::UnboundedSender<DelegateEvent>,
-    notification_release: Notify,
 }
 
-impl HeldNotificationDelegate {
+struct NeverResolvingToolDelegate {
+    events_tx: mpsc::UnboundedSender<DelegateEvent>,
+}
+
+impl NeverResolvingNotificationDelegate {
     fn new() -> (Arc<Self>, mpsc::UnboundedReceiver<DelegateEvent>) {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
-        (
-            Arc::new(Self {
-                events_tx,
-                notification_release: Notify::new(),
-            }),
-            events_rx,
-        )
-    }
-
-    fn release_notification(&self) {
-        self.notification_release.notify_one();
+        (Arc::new(Self { events_tx }), events_rx)
     }
 }
 
-impl CodeModeSessionDelegate for HeldNotificationDelegate {
+impl NeverResolvingToolDelegate {
+    fn new() -> (Arc<Self>, mpsc::UnboundedReceiver<DelegateEvent>) {
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        (Arc::new(Self { events_tx }), events_rx)
+    }
+}
+
+impl CodeModeSessionDelegate for NeverResolvingNotificationDelegate {
     fn invoke_tool<'a>(
         &'a self,
         _invocation: CodeModeNestedToolCall,
-        cancellation_token: CancellationToken,
+        _cancellation_token: CancellationToken,
+    ) -> ToolInvocationFuture<'a> {
+        Box::pin(async { Err("unexpected tool call".to_string()) })
+    }
+
+    fn notify<'a>(
+        &'a self,
+        _call_id: String,
+        _cell_id: CellId,
+        _text: String,
+        _cancellation_token: CancellationToken,
+    ) -> NotificationFuture<'a> {
+        Box::pin(async move {
+            let _ = self.events_tx.send(DelegateEvent::NotificationStarted);
+            std::future::pending().await
+        })
+    }
+
+    fn cell_closed(&self, cell_id: &CellId) {
+        let _ = self
+            .events_tx
+            .send(DelegateEvent::CellClosed(cell_id.clone()));
+    }
+}
+
+impl CodeModeSessionDelegate for NeverResolvingToolDelegate {
+    fn invoke_tool<'a>(
+        &'a self,
+        _invocation: CodeModeNestedToolCall,
+        _cancellation_token: CancellationToken,
     ) -> ToolInvocationFuture<'a> {
         Box::pin(async move {
-            cancellation_token.cancelled().await;
-            Err("cancelled".to_string())
+            let _ = self.events_tx.send(DelegateEvent::ToolStarted);
+            std::future::pending().await
         })
     }
 
@@ -68,15 +91,9 @@ impl CodeModeSessionDelegate for HeldNotificationDelegate {
         _call_id: String,
         _cell_id: CellId,
         _text: String,
-        cancellation_token: CancellationToken,
+        _cancellation_token: CancellationToken,
     ) -> NotificationFuture<'a> {
-        Box::pin(async move {
-            let _ = self.events_tx.send(DelegateEvent::NotificationStarted);
-            cancellation_token.cancelled().await;
-            let _ = self.events_tx.send(DelegateEvent::NotificationCancelled);
-            self.notification_release.notified().await;
-            Ok(())
-        })
+        Box::pin(async { Ok(()) })
     }
 
     fn cell_closed(&self, cell_id: &CellId) {
@@ -92,8 +109,6 @@ impl BlockingDelegate {
         (
             Arc::new(Self {
                 events_tx,
-                notification_finished: AtomicBool::new(false),
-                tool_finished: AtomicBool::new(false),
                 tool_release: Notify::new(),
             }),
             events_rx,
@@ -115,12 +130,9 @@ impl CodeModeSessionDelegate for BlockingDelegate {
             let _ = self.events_tx.send(DelegateEvent::ToolStarted);
             tokio::select! {
                 _ = self.tool_release.notified() => {
-                    self.tool_finished.store(true, Ordering::Release);
                     Ok(serde_json::Value::Null)
                 }
                 _ = cancellation_token.cancelled() => {
-                    self.tool_finished.store(true, Ordering::Release);
-                    let _ = self.events_tx.send(DelegateEvent::ToolCancelled);
                     Err("cancelled".to_string())
                 }
             }
@@ -137,8 +149,6 @@ impl CodeModeSessionDelegate for BlockingDelegate {
         Box::pin(async move {
             let _ = self.events_tx.send(DelegateEvent::NotificationStarted);
             cancellation_token.cancelled().await;
-            self.notification_finished.store(true, Ordering::Release);
-            let _ = self.events_tx.send(DelegateEvent::NotificationCancelled);
             Err("cancelled".to_string())
         })
     }
@@ -289,7 +299,10 @@ async fn observed_natural_completion_wins_over_termination() {
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             let response = service
-                .execute(execute_request(r#"text(String(load("finished")));"#))
+                .execute(ExecuteRequest {
+                    yield_time_ms: Some(60_000),
+                    ..execute_request(r#"text(String(load("finished")));"#)
+                })
                 .await
                 .unwrap()
                 .initial_response()
@@ -323,7 +336,7 @@ async fn observed_natural_completion_wins_over_termination() {
 }
 
 #[tokio::test]
-async fn termination_cancels_pending_callbacks_before_responding() {
+async fn termination_discards_pending_callbacks_before_responding() {
     let (delegate, mut events_rx) = BlockingDelegate::new();
     let service = CodeModeService::with_delegate(delegate.clone());
     let cell = service
@@ -351,11 +364,6 @@ async fn termination_cancels_pending_callbacks_before_responding() {
             content_items: Vec::new(),
         })
     );
-    assert!(delegate.notification_finished.load(Ordering::Acquire));
-    assert_eq!(
-        next_event(&mut events_rx).await,
-        DelegateEvent::NotificationCancelled
-    );
     assert_eq!(
         next_event(&mut events_rx).await,
         DelegateEvent::CellClosed(cell_id("1"))
@@ -363,9 +371,9 @@ async fn termination_cancels_pending_callbacks_before_responding() {
 }
 
 #[tokio::test]
-async fn shutdown_cancels_notifications_while_natural_completion_is_draining() {
-    let (delegate, mut events_rx) = HeldNotificationDelegate::new();
-    let service = Arc::new(CodeModeService::with_delegate(delegate.clone()));
+async fn shutdown_does_not_await_notifications_during_natural_completion() {
+    let (delegate, mut events_rx) = NeverResolvingNotificationDelegate::new();
+    let service = Arc::new(CodeModeService::with_delegate(delegate));
     service
         .execute(execute_request(r#"notify("pending");"#))
         .await
@@ -377,15 +385,12 @@ async fn shutdown_cancels_notifications_while_natural_completion_is_draining() {
     );
 
     let shutdown_service = Arc::clone(&service);
-    let shutdown = tokio::spawn(async move { shutdown_service.shutdown().await });
-
-    assert_eq!(
-        next_event(&mut events_rx).await,
-        DelegateEvent::NotificationCancelled
-    );
-    delegate.release_notification();
-
-    assert_eq!(shutdown.await.unwrap(), Ok(()));
+    tokio::time::timeout(Duration::from_millis(/*millis*/ 100), async move {
+        shutdown_service.shutdown().await
+    })
+    .await
+    .expect("shutdown should not await a non-cooperative notification")
+    .unwrap();
     assert_eq!(
         next_event(&mut events_rx).await,
         DelegateEvent::CellClosed(cell_id("1"))
@@ -393,9 +398,33 @@ async fn shutdown_cancels_notifications_while_natural_completion_is_draining() {
 }
 
 #[tokio::test]
-async fn repeated_termination_is_rejected_while_callback_cleanup_is_pending() {
-    let (delegate, mut events_rx) = HeldNotificationDelegate::new();
-    let service = Arc::new(CodeModeService::with_delegate(delegate.clone()));
+async fn shutdown_does_not_await_a_non_cooperative_nested_tool() {
+    let (delegate, mut events_rx) = NeverResolvingToolDelegate::new();
+    let service = CodeModeService::with_delegate(delegate);
+    let _started = service
+        .execute(ExecuteRequest {
+            enabled_tools: vec![blocking_tool()],
+            source: r#"await tools.block({});"#.to_string(),
+            ..execute_request("")
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(next_event(&mut events_rx).await, DelegateEvent::ToolStarted);
+    tokio::time::timeout(Duration::from_millis(/*millis*/ 100), service.shutdown())
+        .await
+        .expect("shutdown should not await a non-cooperative nested tool")
+        .unwrap();
+    assert_eq!(
+        next_event(&mut events_rx).await,
+        DelegateEvent::CellClosed(cell_id("1"))
+    );
+}
+
+#[tokio::test]
+async fn termination_does_not_await_a_non_cooperative_notification() {
+    let (delegate, mut events_rx) = NeverResolvingNotificationDelegate::new();
+    let service = CodeModeService::with_delegate(delegate);
     let cell = service
         .execute(execute_request(
             r#"notify("pending"); await new Promise(() => {});"#,
@@ -415,23 +444,14 @@ async fn repeated_termination_is_rejected_while_callback_cleanup_is_pending() {
         }
     );
 
-    let terminating_service = Arc::clone(&service);
-    let first_termination =
-        tokio::spawn(async move { terminating_service.terminate(cell_id("1")).await });
     assert_eq!(
-        next_event(&mut events_rx).await,
-        DelegateEvent::NotificationCancelled
-    );
-
-    let repeated_termination = service.terminate(cell_id("1")).await;
-    delegate.release_notification();
-
-    assert_eq!(
-        repeated_termination.unwrap_err(),
-        "exec cell 1 is already terminating"
-    );
-    assert_eq!(
-        first_termination.await.unwrap().unwrap(),
+        tokio::time::timeout(
+            Duration::from_millis(/*millis*/ 100),
+            service.terminate(cell_id("1")),
+        )
+        .await
+        .expect("termination should not await a non-cooperative notification")
+        .unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Terminated {
             cell_id: cell_id("1"),
             content_items: Vec::new(),
@@ -487,41 +507,5 @@ async fn second_observer_is_rejected_without_displacing_the_first() {
     assert_eq!(
         first_observer.await.unwrap(),
         WaitOutcome::LiveCell(terminated)
-    );
-}
-
-#[tokio::test]
-async fn natural_completion_cleans_up_callbacks_before_responding() {
-    let (delegate, mut events_rx) = BlockingDelegate::new();
-    let service = CodeModeService::with_delegate(delegate.clone());
-    let cell = service
-        .execute(ExecuteRequest {
-            enabled_tools: vec![blocking_tool()],
-            source: r#"tools.block({}); text("done");"#.to_string(),
-            yield_time_ms: Some(60_000),
-            ..execute_request("")
-        })
-        .await
-        .unwrap();
-
-    assert_eq!(next_event(&mut events_rx).await, DelegateEvent::ToolStarted);
-    assert_eq!(
-        cell.initial_response().await.unwrap(),
-        RuntimeResponse::Result {
-            cell_id: cell_id("1"),
-            content_items: vec![FunctionCallOutputContentItem::InputText {
-                text: "done".to_string(),
-            }],
-            error_text: None,
-        }
-    );
-    assert!(delegate.tool_finished.load(Ordering::Acquire));
-    assert_eq!(
-        next_event(&mut events_rx).await,
-        DelegateEvent::ToolCancelled
-    );
-    assert_eq!(
-        next_event(&mut events_rx).await,
-        DelegateEvent::CellClosed(cell_id("1"))
     );
 }
