@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
 use codex_code_mode_protocol::ExecuteRequest;
@@ -11,9 +14,15 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::session_runtime::OutputItem as CellOutputItem;
+use crate::session_runtime::OutputItem;
 
 struct TestHost;
+
+#[derive(Default)]
+struct RecordingHost {
+    committed: AtomicBool,
+    notified: AtomicBool,
+}
 
 impl CellHost for TestHost {
     async fn invoke_tool(
@@ -37,9 +46,44 @@ impl CellHost for TestHost {
         &self,
         _stored_value_writes: HashMap<String, JsonValue>,
         event: CellEvent,
+        pending_yield_items: Option<Vec<OutputItem>>,
         cell_state: Arc<CellState>,
     ) -> bool {
-        cell_state.commit_completion(event, || {})
+        cell_state.commit_completion(event, pending_yield_items, || {})
+    }
+
+    async fn closed(&self) {}
+}
+
+impl CellHost for RecordingHost {
+    async fn invoke_tool(
+        &self,
+        _invocation: CellToolCall,
+        _cancellation_token: CancellationToken,
+    ) -> Result<JsonValue, String> {
+        Err("unexpected tool call".to_string())
+    }
+
+    async fn notify(
+        &self,
+        _call_id: String,
+        _text: String,
+        _cancellation_token: CancellationToken,
+    ) -> Result<(), String> {
+        self.notified.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    async fn commit_completion(
+        &self,
+        _stored_value_writes: HashMap<String, JsonValue>,
+        event: CellEvent,
+        pending_yield_items: Option<Vec<OutputItem>>,
+        cell_state: Arc<CellState>,
+    ) -> bool {
+        cell_state.commit_completion(event, pending_yield_items, || {
+            self.committed.store(true, Ordering::Release);
+        })
     }
 
     async fn closed(&self) {}
@@ -48,17 +92,20 @@ impl CellHost for TestHost {
 struct CellActorHarness {
     event_tx: mpsc::UnboundedSender<RuntimeEvent>,
     handle: CellHandle,
-    initial_event_rx: oneshot::Receiver<Result<CellEvent, CellError>>,
     task: tokio::task::JoinHandle<()>,
+    runtime_control_rx: std_mpsc::Receiver<RuntimeControlCommand>,
     _runtime_event_rx: mpsc::UnboundedReceiver<RuntimeEvent>,
 }
 
-fn spawn_cell_actor_harness(initial_observe_mode: ObserveMode) -> CellActorHarness {
+fn spawn_cell_actor_harness() -> CellActorHarness {
+    spawn_cell_actor_harness_with_host(Arc::new(TestHost))
+}
+
+fn spawn_cell_actor_harness_with_host<H: CellHost>(host: Arc<H>) -> CellActorHarness {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (command_tx, command_rx) = mpsc::unbounded_channel();
-    let (initial_event_tx, initial_event_rx) = oneshot::channel();
     let (runtime_event_tx, runtime_event_rx) = mpsc::unbounded_channel();
-    let (runtime_tx, runtime_control_tx, runtime_terminate_handle) = spawn_runtime(
+    let (runtime_tx, _runtime_control_tx, runtime_terminate_handle) = spawn_runtime(
         HashMap::new(),
         ExecuteRequest {
             tool_call_id: "call-1".to_string(),
@@ -71,10 +118,11 @@ fn spawn_cell_actor_harness(initial_observe_mode: ObserveMode) -> CellActorHarne
         PendingRuntimeMode::PauseUntilResumed,
     )
     .unwrap();
+    let (runtime_control_tx, runtime_control_rx) = std_mpsc::channel();
     let cell_state = Arc::new(CellState::new(CancellationToken::new()));
     let handle = CellHandle::new(command_tx, Arc::clone(&cell_state));
     let task = tokio::spawn(run_cell(
-        Arc::new(TestHost),
+        host,
         CellContext {
             runtime_tx,
             runtime_control_tx,
@@ -83,24 +131,178 @@ fn spawn_cell_actor_harness(initial_observe_mode: ObserveMode) -> CellActorHarne
         },
         event_rx,
         command_rx,
-        Observer {
-            mode: initial_observe_mode,
-            response_tx: initial_event_tx,
-        },
     ));
 
     CellActorHarness {
         event_tx,
         handle,
-        initial_event_rx,
         task,
+        runtime_control_rx,
         _runtime_event_rx: runtime_event_rx,
     }
 }
 
 #[tokio::test]
+async fn completion_and_output_are_buffered_until_the_first_observation() {
+    let host = Arc::new(RecordingHost::default());
+    let harness = spawn_cell_actor_harness_with_host(Arc::clone(&host));
+    harness
+        .event_tx
+        .send(RuntimeEvent::ContentItem(
+            FunctionCallOutputContentItem::InputText {
+                text: "before observation".to_string(),
+            },
+        ))
+        .unwrap();
+    harness
+        .event_tx
+        .send(RuntimeEvent::Result {
+            stored_value_writes: HashMap::new(),
+            error_text: None,
+        })
+        .unwrap();
+    while !host.committed.load(Ordering::Acquire) {
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(
+        harness
+            .handle
+            .observe(ObserveMode::YieldAfter(Duration::ZERO))
+            .await,
+        Ok(CellEvent::Completed {
+            content_items: vec![OutputItem::Text {
+                text: "before observation".to_string(),
+            }],
+            error_text: None,
+        })
+    );
+    harness.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn pending_frontier_waits_for_the_first_observation() {
+    let host = Arc::new(RecordingHost::default());
+    let harness = spawn_cell_actor_harness_with_host(Arc::clone(&host));
+    harness.event_tx.send(RuntimeEvent::Pending).unwrap();
+    harness
+        .event_tx
+        .send(RuntimeEvent::Notify {
+            call_id: "notify-1".to_string(),
+            text: "pending processed".to_string(),
+        })
+        .unwrap();
+    while !host.notified.load(Ordering::Acquire) {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(matches!(
+        harness.runtime_control_rx.try_recv(),
+        Err(std_mpsc::TryRecvError::Empty)
+    ));
+    let observation = harness.handle.observe(ObserveMode::PendingFrontier);
+    loop {
+        match harness.runtime_control_rx.try_recv() {
+            Ok(RuntimeControlCommand::Resume) => break,
+            Ok(command) => panic!("expected resume, got {command:?}"),
+            Err(std_mpsc::TryRecvError::Empty) => tokio::task::yield_now().await,
+            Err(std_mpsc::TryRecvError::Disconnected) => {
+                panic!("runtime control channel disconnected")
+            }
+        }
+    }
+    harness.event_tx.send(RuntimeEvent::Pending).unwrap();
+
+    assert_eq!(
+        observation.await,
+        Ok(CellEvent::Pending {
+            content_items: Vec::new(),
+            pending_tool_call_ids: Vec::new(),
+        })
+    );
+
+    let termination = harness.handle.terminate();
+    drop(harness.event_tx);
+    assert_eq!(
+        termination.await,
+        Ok(CellEvent::Terminated {
+            content_items: Vec::new(),
+        })
+    );
+    harness.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn buffered_yield_observation_resumes_an_unobserved_pending_frontier() {
+    let host = Arc::new(RecordingHost::default());
+    let harness = spawn_cell_actor_harness_with_host(Arc::clone(&host));
+    harness.event_tx.send(RuntimeEvent::YieldRequested).unwrap();
+    harness.event_tx.send(RuntimeEvent::Pending).unwrap();
+    harness
+        .event_tx
+        .send(RuntimeEvent::Notify {
+            call_id: "notify-1".to_string(),
+            text: "pending processed".to_string(),
+        })
+        .unwrap();
+    while !host.notified.load(Ordering::Acquire) {
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(
+        harness
+            .handle
+            .observe(ObserveMode::YieldAfter(Duration::from_secs(60)))
+            .await,
+        Ok(CellEvent::Yielded {
+            content_items: Vec::new(),
+        })
+    );
+    loop {
+        match harness.runtime_control_rx.try_recv() {
+            Ok(RuntimeControlCommand::Continue) => break,
+            Ok(command) => panic!("expected continue, got {command:?}"),
+            Err(std_mpsc::TryRecvError::Empty) => tokio::task::yield_now().await,
+            Err(std_mpsc::TryRecvError::Disconnected) => {
+                panic!("runtime control channel disconnected")
+            }
+        }
+    }
+
+    host.notified.store(false, Ordering::Release);
+    harness.event_tx.send(RuntimeEvent::Pending).unwrap();
+    harness
+        .event_tx
+        .send(RuntimeEvent::Notify {
+            call_id: "notify-2".to_string(),
+            text: "later pending processed".to_string(),
+        })
+        .unwrap();
+    while !host.notified.load(Ordering::Acquire) {
+        tokio::task::yield_now().await;
+    }
+    assert!(matches!(
+        harness.runtime_control_rx.try_recv(),
+        Ok(RuntimeControlCommand::Continue)
+    ));
+
+    let termination = harness.handle.terminate();
+    drop(harness.event_tx);
+    assert_eq!(
+        termination.await,
+        Ok(CellEvent::Terminated {
+            content_items: Vec::new(),
+        })
+    );
+    harness.task.await.unwrap();
+}
+
+#[tokio::test]
 async fn yield_timer_preempts_buffered_runtime_output() {
-    let harness = spawn_cell_actor_harness(ObserveMode::YieldAfter(Duration::ZERO));
+    let harness = spawn_cell_actor_harness();
+    let initial_event = harness
+        .handle
+        .observe(ObserveMode::YieldAfter(Duration::ZERO));
     harness.event_tx.send(RuntimeEvent::Started).unwrap();
     harness
         .event_tx
@@ -112,7 +314,7 @@ async fn yield_timer_preempts_buffered_runtime_output() {
         .unwrap();
 
     assert_eq!(
-        harness.initial_event_rx.await.unwrap(),
+        initial_event.await,
         Ok(CellEvent::Yielded {
             content_items: Vec::new(),
         })
@@ -123,7 +325,7 @@ async fn yield_timer_preempts_buffered_runtime_output() {
     assert_eq!(
         termination.await,
         Ok(CellEvent::Terminated {
-            content_items: vec![CellOutputItem::Text {
+            content_items: vec![OutputItem::Text {
                 text: "queued output".to_string(),
             }],
         })
@@ -133,7 +335,7 @@ async fn yield_timer_preempts_buffered_runtime_output() {
 
 #[tokio::test]
 async fn queued_termination_preempts_unobserved_runtime_completion() {
-    let harness = spawn_cell_actor_harness(ObserveMode::YieldAfter(Duration::from_secs(60)));
+    let harness = spawn_cell_actor_harness();
     harness
         .event_tx
         .send(RuntimeEvent::Result {
@@ -146,8 +348,7 @@ async fn queued_termination_preempts_unobserved_runtime_completion() {
     let terminated = Ok(CellEvent::Terminated {
         content_items: Vec::new(),
     });
-    assert_eq!(termination.await, terminated.clone());
-    assert_eq!(harness.initial_event_rx.await.unwrap(), terminated);
+    assert_eq!(termination.await, terminated);
     harness.task.await.unwrap();
 }
 
@@ -158,7 +359,11 @@ async fn only_the_first_termination_claims_a_buffered_completion() {
         content_items: Vec::new(),
         error_text: None,
     };
-    assert!(cell_state.commit_completion(completion.clone(), || {}));
+    assert!(cell_state.commit_completion(
+        completion.clone(),
+        /*pending_yield_items*/ None,
+        || {}
+    ));
     assert!(matches!(
         cell_state.deliver_completion(/*response_tx*/ None),
         CompletionDelivery::Buffered
@@ -185,7 +390,7 @@ fn failed_completion_delivery_rebuffers_the_event() {
         content_items: Vec::new(),
         error_text: None,
     };
-    assert!(cell_state.commit_completion(event.clone(), || {}));
+    assert!(cell_state.commit_completion(event.clone(), /*pending_yield_items*/ None, || {}));
     let (response_tx, response_rx) = oneshot::channel();
     drop(response_rx);
     assert!(matches!(
@@ -196,8 +401,92 @@ fn failed_completion_delivery_rebuffers_the_event() {
 
     let (response_tx, mut response_rx) = oneshot::channel();
     assert!(matches!(
-        cell_state.route_observation(response_tx),
+        cell_state.route_observation(ObserveMode::YieldAfter(Duration::ZERO), response_tx),
         ObservationDelivery::Delivered
     ));
     assert_eq!(response_rx.try_recv(), Ok(Ok(event)));
+}
+
+#[test]
+fn buffered_yield_precedes_buffered_completion_for_yield_observer() {
+    let cell_state = CellState::new(CancellationToken::new());
+    let completion = CellEvent::Completed {
+        content_items: vec![OutputItem::Text {
+            text: "after".to_string(),
+        }],
+        error_text: None,
+    };
+    assert!(cell_state.commit_completion(
+        completion.clone(),
+        Some(vec![OutputItem::Text {
+            text: "before".to_string(),
+        }]),
+        || {}
+    ));
+    assert!(matches!(
+        cell_state.deliver_completion(/*response_tx*/ None),
+        CompletionDelivery::Buffered
+    ));
+
+    let (response_tx, mut response_rx) = oneshot::channel();
+    assert!(matches!(
+        cell_state.route_observation(ObserveMode::YieldAfter(Duration::ZERO), response_tx),
+        ObservationDelivery::Buffered
+    ));
+    assert_eq!(
+        response_rx.try_recv(),
+        Ok(Ok(CellEvent::Yielded {
+            content_items: vec![OutputItem::Text {
+                text: "before".to_string(),
+            }],
+        }))
+    );
+
+    let (response_tx, mut response_rx) = oneshot::channel();
+    assert!(matches!(
+        cell_state.route_observation(ObserveMode::YieldAfter(Duration::ZERO), response_tx),
+        ObservationDelivery::Delivered
+    ));
+    assert_eq!(response_rx.try_recv(), Ok(Ok(completion)));
+}
+
+#[test]
+fn pending_observer_merges_buffered_yield_and_completion_output() {
+    let cell_state = CellState::new(CancellationToken::new());
+    assert!(cell_state.commit_completion(
+        CellEvent::Completed {
+            content_items: vec![OutputItem::Text {
+                text: "after".to_string(),
+            }],
+            error_text: None,
+        },
+        Some(vec![OutputItem::Text {
+            text: "before".to_string(),
+        }]),
+        || {}
+    ));
+    assert!(matches!(
+        cell_state.deliver_completion(/*response_tx*/ None),
+        CompletionDelivery::Buffered
+    ));
+
+    let (response_tx, mut response_rx) = oneshot::channel();
+    assert!(matches!(
+        cell_state.route_observation(ObserveMode::PendingFrontier, response_tx),
+        ObservationDelivery::Delivered
+    ));
+    assert_eq!(
+        response_rx.try_recv(),
+        Ok(Ok(CellEvent::Completed {
+            content_items: vec![
+                OutputItem::Text {
+                    text: "before".to_string(),
+                },
+                OutputItem::Text {
+                    text: "after".to_string(),
+                },
+            ],
+            error_text: None,
+        }))
+    );
 }
