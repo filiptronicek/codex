@@ -65,7 +65,7 @@ impl CodeModeExecuteHandler {
             .services
             .code_mode_service
             .mark_cell_ready_for_dispatch(&cell_id);
-        let response: codex_code_mode::RuntimeResponse = exec
+        let observed = exec
             .session
             .services
             .code_mode_service
@@ -75,9 +75,17 @@ impl CodeModeExecuteHandler {
                     .yield_time_ms
                     .unwrap_or(codex_code_mode::DEFAULT_EXEC_YIELD_TIME_MS),
             })
-            .await
-            .map_err(FunctionCallError::RespondToModel)?
-            .into();
+            .await;
+        let response: codex_code_mode::RuntimeResponse = match observed {
+            Ok(outcome) => outcome.into(),
+            Err(error) => {
+                exec.session
+                    .services
+                    .code_mode_service
+                    .finish_cell_dispatch(&cell_id);
+                return Err(FunctionCallError::RespondToModel(error));
+            }
+        };
         // Record the raw runtime boundary. The model-visible custom-tool output
         // is produced by `handle_runtime_response` and later linked through
         // `CodeCell.output_item_ids` in the reduced trace.

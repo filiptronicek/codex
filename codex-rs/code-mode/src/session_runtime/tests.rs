@@ -28,8 +28,6 @@ impl SessionRuntimeDelegate for RecordingDelegate {
     ) -> Result<(), String> {
         Ok(())
     }
-
-    fn cell_closed(&self, _cell_id: &CellId) {}
 }
 
 fn execute_request(source: &str) -> CreateCellRequest {
