@@ -4,6 +4,7 @@ use anyhow::Result;
 use app_test_support::TestAppServer;
 use app_test_support::to_response;
 use codex_app_server_protocol::EnvironmentAddResponse;
+use codex_app_server_protocol::EnvironmentUpsertResponse;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use serde_json::json;
@@ -48,5 +49,75 @@ async fn environment_add_applies_connect_timeout() -> Result<()> {
     let _: EnvironmentAddResponse = to_response(response)?;
 
     timeout(CONNECTION_CLOSE_TIMEOUT, stalled_server).await???;
+    Ok(())
+}
+
+#[tokio::test]
+async fn environment_upsert_applies_websocket_connect_timeout() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let exec_server_url = format!("ws://{}", listener.local_addr()?);
+    let stalled_server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await?;
+        let mut request = Vec::new();
+        socket.read_to_end(&mut request).await?;
+        anyhow::ensure!(!request.is_empty(), "expected a WebSocket handshake");
+        Ok::<_, anyhow::Error>(())
+    });
+    let codex_home = TempDir::new()?;
+    let mut app_server = TestAppServer::new(codex_home.path()).await?;
+    timeout(RPC_TIMEOUT, app_server.initialize()).await??;
+
+    let request_id = app_server
+        .send_raw_request(
+            "environment/upsert",
+            Some(json!({
+                "environmentId": "remote-a",
+                "transport": {
+                    "type": "websocket",
+                    "execServerUrl": exec_server_url,
+                    "connectTimeoutMs": 1_000,
+                },
+            })),
+        )
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        RPC_TIMEOUT,
+        app_server.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let _: EnvironmentUpsertResponse = to_response(response)?;
+
+    timeout(CONNECTION_CLOSE_TIMEOUT, stalled_server).await???;
+    Ok(())
+}
+
+#[tokio::test]
+async fn environment_upsert_accepts_stdio_transport() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut app_server = TestAppServer::new(codex_home.path()).await?;
+    timeout(RPC_TIMEOUT, app_server.initialize()).await??;
+
+    let request_id = app_server
+        .send_raw_request(
+            "environment/upsert",
+            Some(json!({
+                "environmentId": "remote-a",
+                "transport": {
+                    "type": "stdio",
+                    "program": "codex-test-command-that-does-not-exist",
+                    "args": [],
+                    "env": {},
+                    "cwd": null,
+                    "initializeTimeoutMs": 1_000,
+                },
+            })),
+        )
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        RPC_TIMEOUT,
+        app_server.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let _: EnvironmentUpsertResponse = to_response(response)?;
     Ok(())
 }

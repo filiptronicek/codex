@@ -943,6 +943,13 @@ client_request_definitions! {
         serialization: global("environment"),
         response: v2::EnvironmentAddResponse,
     },
+    #[experimental("environment/upsert")]
+    /// Adds or replaces a remote environment by id and transport for later selection.
+    EnvironmentUpsert => "environment/upsert" {
+        params: v2::EnvironmentUpsertParams,
+        serialization: global("environment"),
+        response: v2::EnvironmentUpsertResponse,
+    },
 
     McpServerOauthLogin => "mcpServer/oauth/login" {
         params: v2::McpServerOauthLoginParams,
@@ -2018,6 +2025,28 @@ mod tests {
             environment_add.serialization_scope(),
             Some(ClientRequestSerializationScope::Global("environment"))
         );
+
+        let environment_upsert = ClientRequest::EnvironmentUpsert {
+            request_id: request_id(),
+            params: v2::EnvironmentUpsertParams {
+                environment_id: "remote-a".to_string(),
+                transport: v2::EnvironmentTransportParams::Stdio {
+                    program: "codex".to_string(),
+                    args: Some(vec![
+                        "exec-server".to_string(),
+                        "--listen".to_string(),
+                        "stdio".to_string(),
+                    ]),
+                    env: None,
+                    cwd: None,
+                    initialize_timeout_ms: None,
+                },
+            },
+        };
+        assert_eq!(
+            environment_upsert.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global("environment"))
+        );
     }
 
     #[test]
@@ -2980,6 +3009,54 @@ mod tests {
     }
 
     #[test]
+    fn serialize_environment_upsert_stdio() -> Result<()> {
+        let request = ClientRequest::EnvironmentUpsert {
+            request_id: RequestId::Integer(9),
+            params: v2::EnvironmentUpsertParams {
+                environment_id: "remote-a".to_string(),
+                transport: v2::EnvironmentTransportParams::Stdio {
+                    program: "ssh".to_string(),
+                    args: Some(vec![
+                        "remote-a.ona.environment".to_string(),
+                        "codex".to_string(),
+                        "exec-server".to_string(),
+                        "--listen".to_string(),
+                        "stdio".to_string(),
+                    ]),
+                    env: None,
+                    cwd: None,
+                    initialize_timeout_ms: Some(300_000),
+                },
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "environment/upsert",
+                "id": 9,
+                "params": {
+                    "environmentId": "remote-a",
+                    "transport": {
+                        "type": "stdio",
+                        "program": "ssh",
+                        "args": [
+                            "remote-a.ona.environment",
+                            "codex",
+                            "exec-server",
+                            "--listen",
+                            "stdio"
+                        ],
+                        "env": null,
+                        "cwd": null,
+                        "initializeTimeoutMs": 300000
+                    }
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn serialize_fs_get_metadata() -> Result<()> {
         let request = ClientRequest::FsGetMetadata {
             request_id: RequestId::Integer(10),
@@ -3402,6 +3479,22 @@ mod tests {
         };
         let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
         assert_eq!(reason, Some("environment/add"));
+    }
+
+    #[test]
+    fn environment_upsert_is_marked_experimental() {
+        let request = ClientRequest::EnvironmentUpsert {
+            request_id: RequestId::Integer(1),
+            params: v2::EnvironmentUpsertParams {
+                environment_id: "remote-a".to_string(),
+                transport: v2::EnvironmentTransportParams::Websocket {
+                    exec_server_url: "ws://127.0.0.1:8765".to_string(),
+                    connect_timeout_ms: None,
+                },
+            },
+        };
+        let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
+        assert_eq!(reason, Some("environment/upsert"));
     }
 
     #[test]

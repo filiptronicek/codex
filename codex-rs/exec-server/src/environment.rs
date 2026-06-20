@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
@@ -12,7 +13,9 @@ use crate::NoiseRendezvousConnectProvider;
 use crate::client::LazyRemoteExecServerClient;
 use crate::client::http_client::ReqwestHttpClient;
 use crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT;
+use crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT;
 use crate::client_api::ExecServerTransportParams;
+use crate::client_api::StdioExecServerCommand;
 use crate::environment_provider::DefaultEnvironmentProvider;
 use crate::environment_provider::EnvironmentDefault;
 use crate::environment_provider::EnvironmentProvider;
@@ -318,6 +321,50 @@ impl EnvironmentManager {
                 exec_server_url,
                 connect_timeout.unwrap_or(DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT),
             ),
+            self.local_runtime_paths.clone(),
+        ));
+        environment.start_connecting();
+        self.environments
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(environment_id, environment);
+        Ok(())
+    }
+
+    /// Adds or replaces a named remote environment that connects by spawning a
+    /// stdio-backed exec-server command. This does not change the manager's
+    /// default environment selection.
+    pub fn upsert_stdio_environment(
+        &self,
+        environment_id: String,
+        program: String,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+        cwd: Option<PathBuf>,
+        initialize_timeout: Option<std::time::Duration>,
+    ) -> Result<(), ExecServerError> {
+        if environment_id.is_empty() {
+            return Err(ExecServerError::Protocol(
+                "environment id cannot be empty".to_string(),
+            ));
+        }
+        let program = program.trim().to_string();
+        if program.is_empty() {
+            return Err(ExecServerError::Protocol(
+                "stdio remote environment program cannot be empty".to_string(),
+            ));
+        }
+        let environment = Arc::new(Environment::remote_with_transport(
+            ExecServerTransportParams::StdioCommand {
+                command: StdioExecServerCommand {
+                    program,
+                    args,
+                    env,
+                    cwd,
+                },
+                initialize_timeout: initialize_timeout
+                    .unwrap_or(DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT),
+            },
             self.local_runtime_paths.clone(),
         ));
         environment.start_connecting();
@@ -651,6 +698,30 @@ mod tests {
 
     fn assert_local_environment_unavailable(manager: &EnvironmentManager) {
         assert!(manager.try_local_environment().is_none());
+    }
+
+    fn fake_stdio_exec_server_command() -> (String, Vec<String>) {
+        #[cfg(windows)]
+        {
+            (
+                "powershell.exe".to_string(),
+                vec![
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    "$null = [Console]::In.ReadLine(); [Console]::Out.WriteLine('{\"id\":1,\"result\":{\"sessionId\":\"stdio-test\"}}'); $null = [Console]::In.ReadLine(); Start-Sleep -Seconds 1".to_string(),
+                ],
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            (
+                "sh".to_string(),
+                vec![
+                    "-c".to_string(),
+                    "read _line; printf '%s\n' '{\"id\":1,\"result\":{\"sessionId\":\"stdio-test\"}}'; read _line; sleep 1".to_string(),
+                ],
+            )
+        }
     }
 
     #[tokio::test]
@@ -1015,6 +1086,34 @@ mod tests {
         assert!(second.is_remote());
         assert_eq!(second.exec_server_url(), Some("ws://127.0.0.1:9876"));
         assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn environment_manager_upserts_named_stdio_environment() {
+        let manager = EnvironmentManager::without_environments();
+        let (program, args) = fake_stdio_exec_server_command();
+
+        manager
+            .upsert_stdio_environment(
+                "stdio-a".to_string(),
+                program,
+                args,
+                HashMap::new(),
+                /*cwd*/ None,
+                Some(Duration::from_secs(1)),
+            )
+            .expect("stdio environment");
+        let environment = manager
+            .get_environment("stdio-a")
+            .expect("stdio environment should be registered");
+
+        assert!(environment.is_remote());
+        assert_eq!(environment.exec_server_url(), None);
+        assert_eq!(manager.default_environment_id(), None);
+        environment
+            .wait_until_ready()
+            .await
+            .expect("stdio environment should initialize");
     }
 
     #[tokio::test]

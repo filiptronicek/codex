@@ -745,6 +745,96 @@
         }
       ]
     },
+    "EnvironmentTransportParams": {
+      "oneOf": [
+        {
+          "properties": {
+            "connectTimeoutMs": {
+              "description": "Optional WebSocket connection timeout. The server default applies when omitted.",
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "execServerUrl": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "websocket"
+              ],
+              "title": "WebsocketEnvironmentTransportParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "execServerUrl",
+            "type"
+          ],
+          "title": "WebsocketEnvironmentTransportParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "cwd": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LegacyAppPathString"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "initializeTimeoutMs": {
+              "description": "Optional stdio initialize timeout. The server default applies when omitted.",
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "program": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "stdio"
+              ],
+              "title": "StdioEnvironmentTransportParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "program",
+            "type"
+          ],
+          "title": "StdioEnvironmentTransportParams",
+          "type": "object"
+        }
+      ]
+    },
     "ExperimentalFeatureEnablementSetParams": {
       "properties": {
         "enablement": {
