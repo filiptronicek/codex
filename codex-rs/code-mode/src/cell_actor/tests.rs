@@ -177,3 +177,27 @@ async fn only_the_first_termination_claims_a_buffered_completion() {
         Some(completion)
     );
 }
+
+#[test]
+fn failed_completion_delivery_rebuffers_the_event() {
+    let cell_state = CellState::new(CancellationToken::new());
+    let event = CellEvent::Completed {
+        content_items: Vec::new(),
+        error_text: None,
+    };
+    assert!(cell_state.commit_completion(event.clone(), || {}));
+    let (response_tx, response_rx) = oneshot::channel();
+    drop(response_rx);
+    assert!(matches!(
+        cell_state.deliver_completion(Some(response_tx)),
+        CompletionDelivery::Buffered
+    ));
+    assert!(cell_state.accepting_observations());
+
+    let (response_tx, mut response_rx) = oneshot::channel();
+    assert!(matches!(
+        cell_state.route_observation(response_tx),
+        ObservationDelivery::Delivered
+    ));
+    assert_eq!(response_rx.try_recv(), Ok(Ok(event)));
+}

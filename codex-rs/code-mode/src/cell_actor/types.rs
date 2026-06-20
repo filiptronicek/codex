@@ -131,6 +131,7 @@ pub(crate) enum CompletionDelivery {
 pub(crate) enum ObservationDelivery {
     Running(oneshot::Sender<Result<CellEvent, CellError>>),
     Delivered,
+    Buffered,
     Closed,
 }
 
@@ -219,9 +220,9 @@ impl CellState {
                 self.cancellation_token.cancel();
                 CompletionDelivery::Delivered
             }
-            Err(Ok(_event)) => {
-                self.cancellation_token.cancel();
-                CompletionDelivery::Delivered
+            Err(Ok(event)) => {
+                *phase = CellPhase::Completed(event);
+                CompletionDelivery::Buffered
             }
             Err(Err(error)) => {
                 panic!("completion delivery unexpectedly carried an actor error: {error:?}")
@@ -247,9 +248,9 @@ impl CellState {
                     self.cancellation_token.cancel();
                     ObservationDelivery::Delivered
                 }
-                Err(Ok(_event)) => {
-                    self.cancellation_token.cancel();
-                    ObservationDelivery::Delivered
+                Err(Ok(event)) => {
+                    *phase = CellPhase::Completed(event);
+                    ObservationDelivery::Buffered
                 }
                 Err(Err(error)) => {
                     panic!("completion delivery unexpectedly carried an actor error: {error:?}")

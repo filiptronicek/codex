@@ -170,7 +170,7 @@ async fn run_cell<H: CellHost>(
                 let response_tx = match cell_state.route_observation(response_tx) {
                     ObservationDelivery::Running(response_tx) => response_tx,
                     ObservationDelivery::Delivered => break,
-                    ObservationDelivery::Closed => continue,
+                    ObservationDelivery::Buffered | ObservationDelivery::Closed => continue,
                 };
                 if observer
                     .as_ref()
